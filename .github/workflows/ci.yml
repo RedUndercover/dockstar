@@ -43,6 +43,8 @@ jobs:
         run: test -z "$(gofmt -l .)"
       - name: Check generated bindings
         run: go generate ./internal/protocol && git diff --exit-code
+      - name: Check Markdown
+        run: npx --yes markdownlint-cli2@0.23.1 '**/*.md'
       - name: Staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@latest $(go list ./... | grep -v '/internal/protocol$')
       - name: Vulnerability scan

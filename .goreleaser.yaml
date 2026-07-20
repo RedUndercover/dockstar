@@ -45,6 +45,11 @@ archives:
       - README.md
       - LICENSE
       - THIRD_PARTY_NOTICES.md
+      - CHANGELOG.md
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - docs/*
+      - wiki/*
       - completions/*
       - man/*
       - packaging/desktop/*
@@ -96,6 +101,18 @@ nfpms:
         dst: /usr/share/doc/dockstar/README.md
       - src: THIRD_PARTY_NOTICES.md
         dst: /usr/share/doc/dockstar/THIRD_PARTY_NOTICES.md
+      - src: CHANGELOG.md
+        dst: /usr/share/doc/dockstar/CHANGELOG.md
+      - src: CONTRIBUTING.md
+        dst: /usr/share/doc/dockstar/CONTRIBUTING.md
+      - src: SECURITY.md
+        dst: /usr/share/doc/dockstar/SECURITY.md
+      - src: docs
+        dst: /usr/share/doc/dockstar/docs
+        type: tree
+      - src: wiki
+        dst: /usr/share/doc/dockstar/wiki
+        type: tree
     overrides:
       deb:
         dependencies: [libgl1, libx11-6, libxcursor1, libxrandr2, libxinerama1, libxi6, libwayland-client0, libxkbcommon0, libxxf86vm1, libxext6, libxrender1, libxfixes3]

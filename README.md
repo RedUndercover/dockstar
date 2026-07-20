@@ -75,6 +75,20 @@ Configuration lives at `$XDG_CONFIG_HOME/dockstar/config.json`. The file is
 versioned and updates use revision checks so simultaneous UI and CLI edits do
 not overwrite each other.
 
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Getting started](docs/getting-started.md)
+- [User guide](docs/user-guide.md)
+- [CLI reference](docs/cli.md)
+- [Configuration reference](docs/configuration.md)
+- [Hardware wake](docs/wake.md)
+- [Architecture](docs/architecture.md)
+- [D-Bus API](docs/dbus-api.md)
+- [Development guide](docs/development.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Small Markdown wiki](wiki/Home.md)
+
 ## Hardware wake limitations
 
 Firmware must resume the machine before Linux can read a newly attached

@@ -6,38 +6,116 @@ dockstar \- display docking automation for KDE Plasma Wayland
 .I command
 .RI [ arguments ]
 .SH DESCRIPTION
-Dockstar detects approved external displays, applies an atomic Plasma display layout, and runs configured docking actions. Its daemon exposes a versioned session D-Bus API used by the CLI and settings application.
+Dockstar detects approved external displays, applies a Plasma display layout,
+and coordinates optional audio, network, power, lock, and suspend actions.
+The daemon exposes a versioned session D-Bus API used by the CLI, tray, and
+settings window.
+.PP
+Version 1 supports Linux amd64 running KDE Plasma 6 on Wayland. A fresh
+configuration uses an empty display allowlist and does not change privileged
+hardware wake state.
 .SH COMMANDS
 .TP
-.B status, devices, diagnose
-Show current state, connected outputs, or diagnostic information as JSON.
+.B daemon
+Run the foreground daemon. Normally started by the systemd user service.
+.TP
+.B status
+Print complete daemon state as JSON.
+.TP
+.B devices
+Print the normalized output array as JSON.
 .TP
 .BI allow " DEVICE_ID"
-Approve a display for automatic docking.
+Approve a display for allowlist detection, creating a default rule if needed.
 .TP
 .BI deny " DEVICE_ID"
-Deny a display.
+Deny a display without deleting its saved rule.
 .TP
 .BI trust " all|allowlist|off"
-Set the display trust policy.
+Set the external display detection policy.
 .TP
 .BI mode " extend|mirror|external-only|internal-only"
-Set and immediately apply the display layout.
+Save the default layout and immediately force evaluation.
 .TP
 .B apply
-Apply the current profile.
+Force display evaluation and rerun active dock actions after a successful
+layout transaction.
+.TP
+.B diagnose
+Print state, environment, backend, config path, and wake diagnostics as JSON.
 .TP
 .BI wake " status|enable|disable|restore"
-Inspect or configure hardware wake sources. Changes require administrator authentication.
+Inspect or configure hardware wake sources. Changes require an installed
+system helper and Polkit authentication. Restore returns sources to their
+first-recorded baseline.
 .TP
-.BI config " show|validate [PATH]"
-Print or validate configuration.
+.B config show
+Load, validate, and print the active configuration.
+.TP
+.BI config " validate [PATH]"
+Validate a JSON configuration file, or the active file when no path is given.
+.TP
+.BI completion " bash|zsh|fish"
+Print basic shell completion definitions.
+.TP
+.B version
+Print version, commit, and build date.
+.SH LAYOUTS
+.TP
+.B extend
+Enable the internal panel and approved externals with an external primary.
+.TP
+.B mirror
+Replicate the selected external primary to the internal panel using the best
+common mode under the configured refresh cap.
+.TP
+.B external-only
+Enable approved external displays and disable the internal panel.
+.TP
+.B internal-only
+Disable external displays and enable the internal panel.
+.SH ENVIRONMENT
+.TP
+.B DOCKSTAR_CONFIG
+Override the complete configuration path.
+.TP
+.B DOCKSTAR_DEBUG
+Set to 1 for daemon debug logging.
+.TP
+.B DOCKSTAR_WAKE_HELPER
+Override the wake helper path, primarily for controlled tests.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for user configuration when DOCKSTAR_CONFIG is unset.
+.TP
+.B XDG_RUNTIME_DIR
+Base directory for the latest runtime state snapshot.
 .SH FILES
+.TP
 .I $XDG_CONFIG_HOME/dockstar/config.json
-.br
+Persistent schema-versioned user configuration.
+.TP
 .I $XDG_RUNTIME_DIR/dockstar/state.json
-.br
+Latest runtime status snapshot.
+.TP
 .I /etc/dockstar/wake.json
+Root-owned desired hardware wake policy.
+.TP
+.I /var/lib/dockstar/wake-baseline.json
+First-recorded hardware wake states used by restore.
+.SH EXIT STATUS
+Zero indicates success. Invalid arguments, unavailable D-Bus services,
+configuration errors, rejected display transactions, failed commands, or wake
+helper failures return nonzero.
+.SH SECURITY
+Only dockstar-wake-helper is intended to run with administrator privileges.
+The daemon, CLI, tray, and settings window run as the desktop user.
 .SH SEE ALSO
 .BR systemd.service (5),
-.BR kscreen-doctor (1)
+.BR systemd-sleep (8),
+.BR kscreen-doctor (1),
+.BR busctl (1),
+.BR pkexec (1)
+.PP
+Full documentation is available at
+https://github.com/redundercover/dockstar/tree/main/docs.
