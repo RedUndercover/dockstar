@@ -1,0 +1,126 @@
+version: 2
+
+project_name: dockstar
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./internal/...
+
+builds:
+  - id: dockstar
+    main: ./cmd/dockstar
+    binary: dockstar
+    goos: [linux]
+    goarch: [amd64]
+    env: [CGO_ENABLED=1]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/redundercover/dockstar/internal/version.Version={{.Version}} -X github.com/redundercover/dockstar/internal/version.Commit={{.Commit}} -X github.com/redundercover/dockstar/internal/version.Date={{.Date}}
+  - id: dockstar-ui
+    main: ./cmd/dockstar-ui
+    binary: dockstar-ui
+    goos: [linux]
+    goarch: [amd64]
+    env: [CGO_ENABLED=1]
+    flags: [-trimpath]
+    tags: [migrated_fynedo]
+    ldflags:
+      - -s -w -X github.com/redundercover/dockstar/internal/version.Version={{.Version}} -X github.com/redundercover/dockstar/internal/version.Commit={{.Commit}} -X github.com/redundercover/dockstar/internal/version.Date={{.Date}}
+  - id: dockstar-wake-helper
+    main: ./cmd/dockstar-wake-helper
+    binary: dockstar-wake-helper
+    goos: [linux]
+    goarch: [amd64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+
+archives:
+  - id: dockstar
+    ids: [dockstar, dockstar-ui, dockstar-wake-helper]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - THIRD_PARTY_NOTICES.md
+      - completions/*
+      - man/*
+      - packaging/desktop/*
+      - packaging/systemd/*
+
+nfpms:
+  - id: dockstar-packages
+    ids: [dockstar, dockstar-ui, dockstar-wake-helper]
+    package_name: dockstar
+    vendor: RedUndercover
+    homepage: https://github.com/redundercover/dockstar
+    maintainer: RedUndercover
+    description: Display docking automation for KDE Plasma 6 Wayland
+    license: MIT
+    formats: [archlinux, deb, rpm]
+    bindir: /usr/bin
+    dependencies:
+      - libgl
+      - libx11
+    contents:
+      - src: packaging/systemd/dockstar.service
+        dst: /usr/lib/systemd/user/dockstar.service
+      - src: packaging/systemd/dockstar-wakeup.service
+        dst: /usr/lib/systemd/system/dockstar-wakeup.service
+      - src: packaging/systemd/50-dockstar-sleep
+        dst: /usr/lib/systemd/system-sleep/50-dockstar
+        file_info: {mode: 0755}
+      - src: packaging/dbus/io.github.redundercover.Dockstar.service
+        dst: /usr/share/dbus-1/services/io.github.redundercover.Dockstar.service
+      - src: packaging/polkit/io.github.redundercover.Dockstar.policy
+        dst: /usr/share/polkit-1/actions/io.github.redundercover.Dockstar.policy
+      - src: packaging/desktop/io.github.redundercover.Dockstar.desktop
+        dst: /usr/share/applications/io.github.redundercover.Dockstar.desktop
+      - src: packaging/desktop/io.github.redundercover.Dockstar.Tray.desktop
+        dst: /etc/xdg/autostart/io.github.redundercover.Dockstar.Tray.desktop
+      - src: packaging/icons/io.github.redundercover.Dockstar.svg
+        dst: /usr/share/icons/hicolor/scalable/apps/io.github.redundercover.Dockstar.svg
+      - src: man/dockstar.1
+        dst: /usr/share/man/man1/dockstar.1
+      - src: completions/dockstar.bash
+        dst: /usr/share/bash-completion/completions/dockstar
+      - src: completions/_dockstar
+        dst: /usr/share/zsh/site-functions/_dockstar
+      - src: completions/dockstar.fish
+        dst: /usr/share/fish/vendor_completions.d/dockstar.fish
+      - src: LICENSE
+        dst: /usr/share/licenses/dockstar/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/dockstar/README.md
+      - src: THIRD_PARTY_NOTICES.md
+        dst: /usr/share/doc/dockstar/THIRD_PARTY_NOTICES.md
+    overrides:
+      deb:
+        dependencies: [libgl1, libx11-6, libxcursor1, libxrandr2, libxinerama1, libxi6, libwayland-client0, libxkbcommon0, libxxf86vm1, libxext6, libxrender1, libxfixes3]
+      rpm:
+        dependencies: [libglvnd-glx, libX11, libXcursor, libXrandr, libXinerama, libXi, wayland-libs, libxkbcommon, libXxf86vm, libXext, libXrender, libXfixes]
+      archlinux:
+        dependencies: [libglvnd, libx11, libxcursor, libxrandr, libxinerama, libxi, wayland, libxkbcommon, libxxf86vm, libxext, libxrender, libxfixes]
+    scripts:
+      postinstall: packaging/scripts/postinstall.sh
+      preremove: packaging/scripts/preremove.sh
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+  - id: package-sbom
+    artifacts: package
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ['^docs:', '^test:', '^ci:']
+
+release:
+  github:
+    owner: redundercover
+    name: dockstar

@@ -1,0 +1,10 @@
+[Unit]
+Description=Apply Dockstar hardware wake policy
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/dockstar-wake-helper apply
+
+[Install]
+WantedBy=multi-user.target

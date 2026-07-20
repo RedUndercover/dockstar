@@ -1,0 +1,15 @@
+[Unit]
+Description=Dockstar display and docking controller
+Documentation=https://github.com/redundercover/dockstar
+After=plasma-kwin_wayland.service plasma-kscreen.service pipewire-pulse.service
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=io.github.redundercover.Dockstar
+ExecStart=/usr/bin/dockstar daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

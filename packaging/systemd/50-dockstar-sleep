@@ -1,0 +1,4 @@
+#!/bin/sh
+case "$1" in
+  post) /usr/bin/dockstar-wake-helper apply >/dev/null 2>&1 || true ;;
+esac

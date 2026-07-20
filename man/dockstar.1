@@ -1,0 +1,43 @@
+.TH DOCKSTAR 1 "July 2026" "Dockstar" "User Commands"
+.SH NAME
+dockstar \- display docking automation for KDE Plasma Wayland
+.SH SYNOPSIS
+.B dockstar
+.I command
+.RI [ arguments ]
+.SH DESCRIPTION
+Dockstar detects approved external displays, applies an atomic Plasma display layout, and runs configured docking actions. Its daemon exposes a versioned session D-Bus API used by the CLI and settings application.
+.SH COMMANDS
+.TP
+.B status, devices, diagnose
+Show current state, connected outputs, or diagnostic information as JSON.
+.TP
+.BI allow " DEVICE_ID"
+Approve a display for automatic docking.
+.TP
+.BI deny " DEVICE_ID"
+Deny a display.
+.TP
+.BI trust " all|allowlist|off"
+Set the display trust policy.
+.TP
+.BI mode " extend|mirror|external-only|internal-only"
+Set and immediately apply the display layout.
+.TP
+.B apply
+Apply the current profile.
+.TP
+.BI wake " status|enable|disable|restore"
+Inspect or configure hardware wake sources. Changes require administrator authentication.
+.TP
+.BI config " show|validate [PATH]"
+Print or validate configuration.
+.SH FILES
+.I $XDG_CONFIG_HOME/dockstar/config.json
+.br
+.I $XDG_RUNTIME_DIR/dockstar/state.json
+.br
+.I /etc/dockstar/wake.json
+.SH SEE ALSO
+.BR systemd.service (5),
+.BR kscreen-doctor (1)

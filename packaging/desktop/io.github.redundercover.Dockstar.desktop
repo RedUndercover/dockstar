@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Dockstar
+Comment=Configure display docking automation
+Icon=io.github.redundercover.Dockstar
+Exec=/usr/bin/env LC_ALL=en_US.UTF-8 dockstar-ui --settings
+Categories=Settings;HardwareSettings;
+Keywords=display;dock;monitor;wayland;
+StartupNotify=true

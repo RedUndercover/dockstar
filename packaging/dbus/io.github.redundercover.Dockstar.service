@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.redundercover.Dockstar
+Exec=/usr/bin/dockstar daemon
+SystemdService=dockstar.service
