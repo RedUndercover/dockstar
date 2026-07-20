@@ -88,6 +88,7 @@ not overwrite each other.
 - [Development guide](docs/development.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Small Markdown wiki](wiki/Home.md)
+- [UI design mockups](design/mockups/README.md)
 
 ## Hardware wake limitations
 
