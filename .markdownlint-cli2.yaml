@@ -5,4 +5,5 @@ config:
 
 ignores:
   - dist/**
+  - "**/node_modules/**"
   - .git/**

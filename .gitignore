@@ -1,5 +1,8 @@
 /build/
 /dist/
+/cmd/dockstar-ui/frontend/node_modules/
+/cmd/dockstar-ui/frontend/dist/*
+!/cmd/dockstar-ui/frontend/dist/.gitkeep
 *.log
 *.tmp
 .idea/

@@ -6,7 +6,8 @@ Dockstar has two unprivileged desktop processes:
 
 - `dockstar daemon` owns detection, configuration, layout changes, actions,
   runtime state, and the D-Bus API.
-- `dockstar-ui` is either the persistent tray or an on-demand settings window.
+- `dockstar-ui` owns the persistent tray and the on-demand Wails settings
+  window in one single-instance process.
 
 Closing the settings window or tray does not stop automation. The daemon is a
 systemd user service and can also be D-Bus activated.
@@ -18,10 +19,10 @@ The tray refreshes status every five seconds. Its menu provides:
 | Item | Behavior |
 | --- | --- |
 | Status | Shows undocked or the active Dockstar layout |
-| Settings | Starts a separate settings-window process |
-| Apply | Forces an evaluation and reapplies the active profile |
+| Open Dockstar | Shows and focuses the settings window |
+| Apply current profile | Forces an evaluation and reapplies the active profile |
 | Layout | Saves and applies extend, mirror, external-only, or internal-only |
-| Quit tray | Exits only the tray process |
+| Quit | Exits the tray and settings process, but not the daemon |
 
 KDE starts the tray from
 `$XDG_CONFIG_HOME/autostart/io.github.redundercover.Dockstar.Tray.desktop` for a
@@ -29,20 +30,24 @@ source installation, or `/etc/xdg/autostart` for a package installation.
 
 ## Settings window
 
-The settings window has five tabs:
+The settings window has five views:
 
-| Tab | Contents |
+| View | Contents |
 | --- | --- |
-| Status | Dock state, layout, primary output, backend, update time, last error, and Apply |
-| Displays | Connected outputs, connector, resolution, scale, identity, and external approval |
-| Automation | Detection, normal and closed-lid layouts, audio, network, power, lock, and suspend policies |
-| Wake | System wake policy and discovered controller states, with enable and disable actions |
-| Diagnostics | The same structured diagnostic document returned by `dockstar diagnose` |
+| Overview | Dock state, graphical topology, primary output, backend, update time, and quick layout application |
+| Displays | Connected outputs, approval, mode, scale, position, primary priority, and EDID identity |
+| Automation | Detection, layouts, system policies, restore behavior, closed-lid safety, and an outcome preview |
+| Wake & power | Wake policy and eligible controller states, with enable, disable, and baseline restore actions |
+| Diagnostics | The structured `dockstar diagnose` report, with refresh and copy actions |
 
-Save in Automation uses the revision read when the window opened. If another
-client changed the configuration in the meantime, Dockstar rejects the stale
-save instead of overwriting the newer settings. Reopen the window to reload the
-latest revision.
+Save operations use the revision loaded with the current UI state. If another
+client changes the configuration in the meantime, Dockstar rejects the stale
+save instead of overwriting newer settings. Refresh, reapply the intended
+changes, and save again.
+
+Closing the window hides it while the tray remains active. Launching
+`dockstar-ui --settings` while the tray process already exists focuses that
+same window rather than starting another settings client.
 
 ## Detection policies
 

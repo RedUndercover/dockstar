@@ -1,0 +1,16 @@
+{
+  "name": "dockstar-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "lucide": "^1.25.0"
+  },
+  "devDependencies": {
+    "vite": "^7.3.6"
+  }
+}

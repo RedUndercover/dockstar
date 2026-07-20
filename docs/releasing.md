@@ -96,9 +96,10 @@ make test
 go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-For Fyne updates, rebuild and visually inspect every settings tab at common
-Plasma scale factors. For `wlcl` or KDE protocol updates, regenerate bindings
-and retest mirror mode on the oldest supported Plasma version.
+For Wails, WebKitGTK, Vite, or Lucide updates, rebuild the embedded frontend and
+visually inspect every settings view at the 1360x860 target size and 940x640
+minimum size. For `wlcl` or KDE protocol updates, regenerate bindings and
+retest mirror mode on the oldest supported Plasma version.
 
 ## Post-release verification
 

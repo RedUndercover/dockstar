@@ -18,15 +18,14 @@ The main ownership rules are:
 
 ```mermaid
 flowchart LR
-    Tray[dockstar-ui tray] -->|session D-Bus| Daemon[dockstar daemon]
-    Settings[dockstar-ui settings] -->|session D-Bus| Daemon
+    UI[dockstar-ui Wails window and tray] -->|session D-Bus| Daemon[dockstar daemon]
     CLI[dockstar CLI] -->|session D-Bus| Daemon
     Daemon --> Config[config.json]
     Daemon --> KScreen[kscreen-doctor]
     Daemon --> KWin[KWin Wayland protocols]
     Daemon --> Desktop[PowerDevil, logind, Pulse, NetworkManager, power profiles]
     CLI -->|pkexec| Helper[dockstar-wake-helper]
-    Settings -->|dockstar wake| Helper
+    UI -->|dockstar wake| Helper
     Helper --> Sysfs[PCI power/wakeup]
     Helper --> WakePolicy[/etc and /var/lib wake JSON]
 ```
@@ -40,10 +39,18 @@ file.
 
 ### `dockstar-ui`
 
-Without arguments, the UI runs the system tray and polls daemon status every
-five seconds. With `--settings`, it opens the Fyne settings window. The tray
-starts a new settings process rather than mixing the Fyne window loop into the
-tray process.
+The UI embeds a Wails frontend and runs the system tray through systray's
+external event loop. Without arguments it starts with the window hidden; with
+`--settings` it starts visible. A single-instance lock routes later launches to
+the existing process and shows its window. Closing the window hides it, while
+Quit from the tray ends the UI process. The daemon remains independent in all
+cases.
+
+The Go adapter in `cmd/dockstar-ui` exposes typed state, configuration, apply,
+approval, wake, and diagnostic methods to JavaScript. Each operation remains a
+D-Bus call to the daemon. The frontend under `cmd/dockstar-ui/frontend` owns
+rendering, draft state, navigation, outcome previews, and responsive layout;
+it never writes the configuration file directly.
 
 ### `dockstar-wake-helper`
 

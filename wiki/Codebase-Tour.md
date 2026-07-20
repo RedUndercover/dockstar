@@ -43,15 +43,17 @@ discovery, validation, policy, baseline, and writes.
 
 ### 8. UI
 
-`cmd/dockstar-ui/main.go` contains both UI modes. `trayReady` builds the tray;
-`settingsUI.build` creates the tabs; other methods load, render, save, and call
-the daemon.
+`cmd/dockstar-ui/main.go` is the typed Wails-to-D-Bus adapter and process
+lifecycle. `cmd/dockstar-ui/tray.go` owns the systray menu and polling. The
+embedded application lives under `cmd/dockstar-ui/frontend`: `src/main.js`
+owns state and interactions, while `src/styles.css` implements the shared
+responsive visual system.
 
 ## Package dependency direction
 
 ```text
 cmd/dockstar --------> config, daemon, display, ipc, wake
-cmd/dockstar-ui -----> config, daemon models, ipc
+cmd/dockstar-ui -----> config, daemon models, ipc, Wails
 cmd/wake-helper -----> wake
 
 daemon -------------> config, display contract, platform, wake status

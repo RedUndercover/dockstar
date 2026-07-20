@@ -54,7 +54,8 @@ remains disabled until a user explicitly enables it.
 
 ## Install from source
 
-Install Go 1.25 or later and the Fyne Linux development libraries, then run:
+Install Go 1.25 or later, Node.js 22 or later, npm, GTK 3 development files,
+and WebKitGTK 4.1 development files, then run:
 
 ```sh
 git clone https://github.com/redundercover/dockstar.git
@@ -86,8 +87,8 @@ least the internal panel. An undocked system normally has an empty `layout` and
 
 1. Connect the monitor or dock while the computer is awake.
 2. Open Dockstar Settings from the tray or application menu.
-3. Open the Displays tab and enable `Approved` for the external display.
-4. Confirm the desired layout in the Automation tab.
+3. Open **Displays** and enable **Approved device** for the external display.
+4. Confirm the desired layout under **Automation**.
 5. Select Apply or wait for the next two-second evaluation.
 
 The CLI equivalent is:

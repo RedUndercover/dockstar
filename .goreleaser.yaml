@@ -4,6 +4,8 @@ project_name: dockstar
 
 before:
   hooks:
+    - npm --prefix cmd/dockstar-ui/frontend ci
+    - npm --prefix cmd/dockstar-ui/frontend run build
     - go mod tidy
     - go test ./internal/...
 
@@ -24,7 +26,7 @@ builds:
     goarch: [amd64]
     env: [CGO_ENABLED=1]
     flags: [-trimpath]
-    tags: [migrated_fynedo]
+    tags: [production, desktop, webkit2_41]
     ldflags:
       - -s -w -X github.com/redundercover/dockstar/internal/version.Version={{.Version}} -X github.com/redundercover/dockstar/internal/version.Commit={{.Commit}} -X github.com/redundercover/dockstar/internal/version.Date={{.Date}}
   - id: dockstar-wake-helper
@@ -49,6 +51,7 @@ archives:
       - CONTRIBUTING.md
       - SECURITY.md
       - docs/*
+      - design/mockups/*
       - wiki/*
       - completions/*
       - man/*
@@ -66,9 +69,7 @@ nfpms:
     license: MIT
     formats: [archlinux, deb, rpm]
     bindir: /usr/bin
-    dependencies:
-      - libgl
-      - libx11
+    dependencies: [webkit2gtk-4.1, gtk3]
     contents:
       - src: packaging/systemd/dockstar.service
         dst: /usr/lib/systemd/user/dockstar.service
@@ -110,16 +111,19 @@ nfpms:
       - src: docs
         dst: /usr/share/doc/dockstar/docs
         type: tree
+      - src: design/mockups
+        dst: /usr/share/doc/dockstar/design/mockups
+        type: tree
       - src: wiki
         dst: /usr/share/doc/dockstar/wiki
         type: tree
     overrides:
       deb:
-        dependencies: [libgl1, libx11-6, libxcursor1, libxrandr2, libxinerama1, libxi6, libwayland-client0, libxkbcommon0, libxxf86vm1, libxext6, libxrender1, libxfixes3]
+        dependencies: [libwebkit2gtk-4.1-0, libgtk-3-0]
       rpm:
-        dependencies: [libglvnd-glx, libX11, libXcursor, libXrandr, libXinerama, libXi, wayland-libs, libxkbcommon, libXxf86vm, libXext, libXrender, libXfixes]
+        dependencies: [webkit2gtk4.1, gtk3]
       archlinux:
-        dependencies: [libglvnd, libx11, libxcursor, libxrandr, libxinerama, libxi, wayland, libxkbcommon, libxxf86vm, libxext, libxrender, libxfixes]
+        dependencies: [webkit2gtk-4.1, gtk3]
     scripts:
       postinstall: packaging/scripts/postinstall.sh
       preremove: packaging/scripts/preremove.sh

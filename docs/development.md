@@ -5,7 +5,8 @@
 | Path | Responsibility |
 | --- | --- |
 | `cmd/dockstar` | CLI parsing, daemon assembly, signals, logging, and version output |
-| `cmd/dockstar-ui` | Tray process and Fyne settings window |
+| `cmd/dockstar-ui` | Wails adapter, tray process, and embedded frontend |
+| `cmd/dockstar-ui/frontend` | Vanilla JavaScript, CSS, Lucide icons, and Vite build |
 | `cmd/dockstar-wake-helper` | Root helper entry point |
 | `internal/config` | Schema, validation, revisioning, and atomic storage |
 | `internal/daemon` | Evaluation loop and dock state machine |
@@ -23,7 +24,9 @@ The [wiki codebase tour](../wiki/Codebase-Tour.md) is a shorter reading order.
 ## Toolchain
 
 - Go 1.25 or newer; CI covers Go 1.25 and 1.26.
-- A C toolchain and Fyne Linux dependencies for `dockstar-ui`.
+- Node.js 22 or newer and npm for the embedded frontend.
+- A C toolchain, GTK 3 development files, and WebKitGTK 4.1 development files
+  for `dockstar-ui`.
 - KScreen for live integration checks.
 - Optional `staticcheck`, `govulncheck`, GoReleaser, and Syft for full quality
   and release targets.
@@ -41,8 +44,19 @@ make install-user   # install and start a source build for this user
 make uninstall-user
 ```
 
-The UI is built with the `migrated_fynedo` tag. UI code must keep all widget
-changes on Fyne's event thread or wrap future background updates in `fyne.Do`.
+`make build` runs `npm ci` and the Vite production build before compiling Go.
+The Wails binary uses the `production`, `desktop`, and, when available,
+`webkit2_41` build tags. Generated frontend assets are embedded into
+`dockstar-ui`.
+
+Run the browser preview with representative mock state:
+
+```sh
+npm --prefix cmd/dockstar-ui/frontend run dev
+```
+
+The preview is for layout and interaction development. The installed Wails
+window uses live state through the Go adapter and D-Bus.
 
 ## Run without installing
 

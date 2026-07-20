@@ -38,7 +38,8 @@ The last three integrations are optional when their policies are set to
 
 ## Build
 
-Go 1.25 or newer and the normal Fyne Linux development libraries are required.
+Building from source requires Go 1.25 or newer, Node.js 22 or newer, npm, GTK
+3 development files, and WebKitGTK 4.1 development files.
 
 ```sh
 make build

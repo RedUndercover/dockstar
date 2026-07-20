@@ -253,6 +253,22 @@ ls ~/.config/autostart/io.github.redundercover.Dockstar.Tray.desktop \
 pgrep -af dockstar-ui
 ```
 
+The normal autostart launch keeps the Wails window hidden. Click the tray icon
+or run `dockstar-ui --settings` to show the existing single-instance window.
+
+## Settings window is blank
+
+Confirm the WebKitGTK 4.1 runtime is installed, then start the UI from a
+terminal to collect WebKit errors:
+
+```sh
+pkg-config --modversion webkit2gtk-4.1
+dockstar-ui --settings
+```
+
+Distribution packages declare WebKitGTK and GTK 3 runtime dependencies. Source
+builds require the matching development packages during compilation.
+
 ## Settings save reports a revision conflict
 
 Another writer changed config after the window loaded it. Close and reopen the
