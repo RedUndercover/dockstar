@@ -7,11 +7,32 @@ Dockstar handles two distinct parts of docking:
 1. Firmware and hardware must wake the CPU when a dock, USB-C cable, or display
    controller signals activity.
 2. After Linux resumes, the user daemon identifies the display, applies trust
-   policy, wakes display power with KScreen, and configures the layout.
+   policy, holds a short sleep-protection guard, wakes display power with
+   KScreen, and configures the layout.
 
 The daemon cannot read EDID or apply an allowlist while the CPU is asleep. An
 unknown device may therefore wake the computer before Dockstar decides not to
 configure it.
+
+## Sleep protection after wake
+
+Hardware wake and sleep protection solve different halves of the same flow.
+When the root-owned wake policy is enabled, `PrepareForSleep(false)` starts a
+20-second resume guard before display discovery. This prevents a closed-lid
+machine from immediately following its normal automatic sleep policy while
+KWin is still discovering the dock. As soon as an approved display appears,
+the guard becomes docked protection. If none appears, it expires and releases
+all inhibitors.
+
+The user-level `power.keepAwakeWhileDocked` setting controls this behavior and
+defaults to enabled. It does not enable hardware wake by itself. Dockstar does
+not require users to select **Do nothing** for lid-close behavior and does not
+modify Plasma power settings, logind configuration, PAM, or authentication.
+
+PowerDevil is the preferred backend because explicit Plasma Sleep commands
+bypass application inhibition. A logind inhibitor covers PowerDevil's startup
+delay and is used as a compatibility fallback. The GUI reports which backend
+is active; see [Troubleshooting](troubleshooting.md#sleep-protection-is-unavailable).
 
 ## Package requirement
 
@@ -24,19 +45,37 @@ Hardware wake setup requires these system-installed files:
 | `/usr/lib/systemd/system-sleep/50-dockstar` | Reapply policy after resume |
 | `/usr/lib/systemd/system/dockstar-wakeup.service` | Optional one-shot policy application |
 
+The GUI also requires the system `pkexec` executable supplied by Polkit so it
+can show the desktop authorization prompt without running the UI or daemon as
+root.
+
 The source-only user installer intentionally does not install them.
+
+Dockstar Settings checks the helper, Polkit policy, and resume hook separately
+from the wake policy in `/etc/dockstar/wake.json`. When the packaged support is
+present, **Wake & power** exposes an **Allow docks to wake this computer**
+toggle. Changing it requests administrator authorization through Polkit. A
+source-only install instead shows the missing system components and keeps the
+toggle unavailable rather than attempting an unsafe privileged installation
+from a user-writable build directory.
 
 ## Discovering sources
 
-Dockstar scans `/sys/bus/pci/devices/*`. A device is managed when:
+Dockstar scans PCI controllers under `/sys/bus/pci/devices/*` and USB root hubs
+under `/sys/bus/usb/devices/usb*`. A PCI device is managed when:
 
 - Its PCI address matches `0000:BB:DD.F` with lowercase hexadecimal digits.
 - Its class begins with `0x03` for a display controller or `0x0c03` for a USB
   controller, including Thunderbolt USB and NHI classes on supported systems.
 - Its `power/wakeup` file is readable.
 
-`dockstar wake status` reports the PCI ID, class, vendor, device, and live
-`enabled` or `disabled` state for every managed source.
+A USB root hub is managed when its name is strictly `usbN` and its
+`power/wakeup` file is readable. Root hubs are required on systems where the
+PCI xHCI controller is wake-capable but USB connect detection remains disabled
+at the USB bus layer.
+
+`dockstar wake status` reports each source ID, class, vendor, device, and live
+`enabled` or `disabled` state.
 
 ## Enable
 
@@ -49,11 +88,13 @@ Polkit authenticates the user, then the helper:
 1. Discovers the current managed source set.
 2. Records the original state of each source in
    `/var/lib/dockstar/wake-baseline.json` if no baseline exists.
-3. Writes an enabled policy and source IDs to `/etc/dockstar/wake.json`.
+3. Writes an enabled policy with PCI controller and USB root-hub source IDs to
+   `/etc/dockstar/wake.json`.
 4. Writes `enabled` to each validated source's `power/wakeup` file.
 
-The baseline is intentionally write-once. Later enable or disable operations do
-not replace the original values.
+The baseline is intentionally write-once per source. Later enable or disable
+operations preserve recorded values, while newly supported sources are added
+with their then-current state.
 
 ## Disable versus restore
 
@@ -88,10 +129,12 @@ operation and is not enabled by Dockstar automatically.
 
 The daemon and UI never run as root. Polkit authorizes only the dedicated wake
 helper path. The helper accepts `enable`, `disable`, `apply`, or `restore`; it
-rejects arbitrary actions, PCI identifiers, filesystem paths, and wake states.
+rejects arbitrary actions, malformed source identifiers, filesystem paths, and
+wake states.
 
-The helper derives each sysfs path from a validated PCI identifier and checks
-that the target exists before writing it. Policy JSON is written atomically.
+The helper derives each sysfs path from a validated PCI or USB-root identifier
+and checks that the target exists before writing it. Policy JSON is written
+atomically.
 
 ## Firmware limitations
 

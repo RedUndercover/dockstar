@@ -58,6 +58,15 @@ Wake policy is root-owned system state. It controls eligible PCI display and
 USB controller `power/wakeup` files. It is independent from the user display
 allowlist because the computer must wake before EDID can be read.
 
+## Sleep protection
+
+Sleep protection is unprivileged, temporary daemon state. It prevents
+automatic sleep while an approved dock is active, during post-resume discovery,
+and briefly during a closed-lid disconnect. PowerDevil is the native backend;
+logind is the startup bridge and compatibility fallback. It is independent of
+the root-owned hardware wake policy and never rewrites the desktop's saved
+power settings.
+
 ## Restore baseline
 
 The wake helper records controller state once before its first change. Restore

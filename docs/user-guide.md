@@ -34,11 +34,16 @@ The settings window has five views:
 
 | View | Contents |
 | --- | --- |
-| Overview | Dock state, graphical topology, primary output, backend, update time, and quick layout application |
+| Overview | Dock state, graphical topology, primary output, sleep protection, backend, update time, and quick layout application |
 | Displays | Connected outputs, approval, mode, scale, position, primary priority, and EDID identity |
 | Automation | Detection, layouts, system policies, restore behavior, closed-lid safety, and an outcome preview |
-| Wake & power | Wake policy and eligible controller states, with enable, disable, and baseline restore actions |
+| Wake & power | Hardware-wake toggle, sleep-protection status, packaged-support status, controller states, and baseline restore |
 | Diagnostics | The structured `dockstar diagnose` report, with refresh and copy actions |
+
+The **Start Dockstar automatically** toggle under **Automation** controls both
+the user service and KDE tray at sign-in. Turning it off does not interrupt the
+current session. Opening Dockstar Settings later may still start the daemon on
+demand through D-Bus activation.
 
 Save operations use the revision loaded with the current UI state. If another
 client changes the configuration in the meantime, Dockstar rejects the stale
@@ -48,6 +53,11 @@ changes, and save again.
 Closing the window hides it while the tray remains active. Launching
 `dockstar-ui --settings` while the tray process already exists focuses that
 same window rather than starting another settings client.
+
+Closed-lid undock locking is edge-triggered and guarded against connection
+flapping. After Dockstar locks or suspends once, it will not repeat that action
+until the lid has been opened. Both closed-lid safety actions default to off and
+must be enabled explicitly under **Automation**.
 
 ## Detection policies
 
@@ -145,6 +155,29 @@ When AC power is online, Dockstar saves the current power profile and applies
 the configured `performance`, `balanced`, or `power-saver` profile. It restores
 the saved profile on undock when `restore` is true.
 
+**Keep computer awake while docked** is enabled by default. It prevents
+automatic idle and lid sleep only after an approved external display creates
+the Dockstar docked state. Plasma's native inhibitor is preferred, which means
+choosing **Sleep** explicitly still works. Dockstar uses logind temporarily
+while PowerDevil activates the inhibitor and as a compatibility fallback if
+PowerDevil is unavailable.
+
+The protection status appears on **Overview** and **Wake & power**:
+
+| Status | Meaning |
+| --- | --- |
+| Ready | Enabled, with no approved dock currently active |
+| Active | PowerDevil is protecting the docked session |
+| Starting | The temporary logind bridge is covering PowerDevil warmup |
+| Resume guard | Dockstar is waiting for display discovery after hardware wake |
+| Disconnect guard | A short closed-lid disconnect window is active |
+| Compatibility mode | logind is protecting the session because PowerDevil is unavailable |
+| Unavailable | Neither backend is active, or Plasma blocked the inhibition |
+
+Compatibility mode can block an explicit Sleep request because logind cannot
+distinguish it from automatic sleep. The GUI shows this condition rather than
+silently changing desktop settings.
+
 ## Restore lifetime
 
 Audio, power, Ethernet, and Wi-Fi baselines are held in daemon memory. A daemon
@@ -156,6 +189,12 @@ docking when exact restoration matters.
 
 - Display state is evaluated every two seconds.
 - Identical connected-device, approval, and lid signatures are skipped.
-- Resume from logind triggers a forced evaluation after 750 milliseconds.
+- Resume from logind starts protection immediately when hardware wake is
+  enabled, then polls after 250 milliseconds, every 500 milliseconds for the
+  first five seconds, and every second for up to 20 seconds.
+- PowerDevil activation is verified after six seconds; logind covers that
+  warmup and is normally released afterward.
+- Closed-lid undock protection lasts up to five seconds unless Dockstar is
+  intentionally suspending.
 - Platform commands have a 15-second timeout.
 - Normal CLI operations have a 30-second context timeout.

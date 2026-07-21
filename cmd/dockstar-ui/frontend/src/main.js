@@ -26,6 +26,8 @@ let busy = false;
 let toastTimer = 0;
 let toastMessage = '';
 let toastError = false;
+let renderedView = '';
+const viewScrollPositions = new Map();
 
 init();
 
@@ -101,6 +103,12 @@ function mockCall(method, args) {
     });
     return structuredClone(state);
   }
+  if (method === 'SetStartupEnabled') {
+    state.startup.enabled = args[0];
+    state.startup.serviceEnabled = args[0];
+    state.startup.trayEnabled = args[0];
+    return structuredClone(state);
+  }
   return structuredClone(state);
 }
 
@@ -114,6 +122,10 @@ function resetDraft() {
 }
 
 function render() {
+  const previousContent = root.querySelector('.content');
+  if (previousContent && renderedView) {
+    viewScrollPositions.set(renderedView, previousContent.scrollTop);
+  }
   root.innerHTML = `
     <div class="app-shell">
       ${renderHeader()}
@@ -126,6 +138,8 @@ function render() {
   `;
   bindEvents();
   createIcons({ icons, attrs: { 'aria-hidden': 'true' } });
+  root.querySelector('.content')?.scrollTo({ top: viewScrollPositions.get(activeView) || 0 });
+  renderedView = activeView;
 }
 
 function renderHeader() {
@@ -178,6 +192,10 @@ function renderView() {
 function renderOverview() {
   const layout = state.status.layout || draft.defaultLayout;
   const external = connectedOutputs().find((output) => !output.panel);
+  const protection = sleepProtectionSummary();
+  const hardwareWakePolicy = state.wakeSupport?.manageable && state.wake.installed && state.wake.enabled;
+  const hardwareWake = hardwareWakePolicy && state.wake.sources.every((source) => source.state === 'enabled');
+  const hardwareWakeLabel = !state.wakeSupport?.manageable ? 'Setup required' : hardwareWake ? 'Enabled' : hardwareWakePolicy ? 'Needs apply' : 'Disabled';
   return `
     <div class="page-heading">
       <div><span class="eyebrow">Current workspace</span><h1>Overview</h1></div>
@@ -197,6 +215,8 @@ function renderOverview() {
         <div class="section-heading"><h2>System status</h2></div>
         ${statusRow('server', 'Daemon', state.status.lastError ? 'Error' : 'Running', !state.status.lastError)}
         ${statusRow('monitor-cog', 'Display backend', state.status.backend || 'Unavailable', Boolean(state.status.backend))}
+        ${statusRow('shield-check', 'Sleep protection', protection.label, protection.good)}
+        ${statusRow('power', 'Hardware wake', hardwareWakeLabel, hardwareWake)}
         ${statusRow('laptop', 'Lid', state.status.lidClosed ? 'Closed' : 'Open', true)}
         ${statusRow('clock-3', 'Last updated', relativeTime(state.status.updated), true)}
         ${state.status.lastError ? `<div class="error-message"><i data-lucide="circle-alert"></i><span>${escapeHTML(state.status.lastError)}</span></div>` : ''}
@@ -298,6 +318,17 @@ function renderAutomation() {
     <div class="automation-grid">
       <div class="automation-main">
         <section class="surface form-section">
+          <div class="section-heading"><h2><i data-lucide="rocket"></i>Application</h2></div>
+          <div class="form-rows">
+            <label class="form-row switch-row ${state.startup?.error ? 'disabled' : ''}">
+              <span><strong>Start Dockstar automatically</strong><small>Launch the controller and tray when you sign in</small></span>
+              <input type="checkbox" data-startup-toggle ${state.startup?.enabled ? 'checked' : ''} ${state.startup?.error || busy ? 'disabled' : ''} />
+              <span class="switch" aria-hidden="true"></span>
+            </label>
+          </div>
+          ${state.startup?.error ? `<div class="error-message"><i data-lucide="circle-alert"></i><span>${escapeHTML(state.startup.error)}</span></div>` : ''}
+        </section>
+        <section class="surface form-section">
           <div class="section-heading"><h2><i data-lucide="scan-search"></i>Detection</h2></div>
           <div class="form-rows">
             ${selectRow('Detection policy', 'Which external displays trigger Dockstar', 'detection', [['allowlist', 'Approved displays only'], ['all', 'All external displays'], ['off', 'Automation off']], draft.detection)}
@@ -313,6 +344,7 @@ function renderAutomation() {
             ${selectRow('Network', 'Preferred connection while docked', 'network.policy', [['prefer-wired', 'Prefer wired'], ['wired-only', 'Wired only'], ['unchanged', 'Leave unchanged']], draft.network.policy, 'network')}
             ${selectRow('AC power profile', 'Power profile used while docked on AC', 'power.onAcProfile', [['performance', 'Performance'], ['balanced', 'Balanced'], ['power-saver', 'Power saver'], ['unchanged', 'Leave unchanged']], draft.power.onAcProfile, 'gauge')}
             ${checkRow('Restore previous power profile on undock', 'power.restore', draft.power.restore)}
+            ${checkRow('Keep computer awake while docked', 'power.keepAwakeWhileDocked', draft.power.keepAwakeWhileDocked, 'Prevent automatic lid and idle sleep for approved docks')}
           </div>
         </section>
         <section class="surface form-section">
@@ -337,25 +369,44 @@ function renderAutomation() {
 
 function renderWake() {
   const wake = state.wake;
-  const enabled = wake.installed && wake.enabled;
+  const protection = sleepProtectionSummary();
+  const support = state.wakeSupport || { manageable: false, persistent: false, missing: [] };
+  const enabled = support.manageable && wake.installed && wake.enabled;
+  const outOfSync = enabled && wake.sources.some((source) => source.state !== 'enabled');
+  const statusLabel = state.wakeError ? 'Unavailable' : !support.manageable ? 'Setup required' : outOfSync ? 'Needs apply' : enabled ? 'Enabled' : 'Disabled';
+  const heading = !support.manageable ? 'System support is required' : outOfSync ? 'Wake policy needs reapplying' : enabled ? 'Dock wake is enabled' : 'Dock wake is disabled';
+  const detail = !support.manageable
+    ? 'Install Dockstar from a system package to add the privileged wake helper.'
+    : `${wake.sources.length} eligible controller${wake.sources.length === 1 ? '' : 's'} detected${support.persistent ? ' · reapplied after resume' : ''}`;
   return `
     <div class="page-heading">
       <div><span class="eyebrow">Resume hardware</span><h1>Wake & power</h1></div>
-      <span class="status-badge ${enabled ? 'good' : ''}">${state.wakeError ? 'Unavailable' : enabled ? 'Enabled' : 'Disabled'}</span>
+      <span class="status-badge ${enabled ? 'good' : ''}">${statusLabel}</span>
     </div>
     ${state.wakeError ? `<div class="banner error"><i data-lucide="circle-alert"></i><span>${escapeHTML(state.wakeError)}</span></div>` : ''}
+    ${protection.warning ? `<div class="banner warning"><i data-lucide="triangle-alert"></i><span>${escapeHTML(protection.warning)}</span></div>` : ''}
     <div class="wake-grid">
       <section class="surface wake-summary">
-        <div class="wake-hero-icon ${enabled ? 'enabled' : ''}"><i data-lucide="power"></i></div>
-        <div><span class="eyebrow">Hardware wake</span><h2>${enabled ? 'Dock wake is enabled' : 'Dock wake is disabled'}</h2><p>${wake.installed ? `${wake.sources.length} eligible controller${wake.sources.length === 1 ? '' : 's'} detected` : 'No Dockstar wake policy is installed'}</p></div>
+        <div class="wake-hero-icon ${enabled && !outOfSync ? 'enabled' : ''}"><i data-lucide="power"></i></div>
+        <div><span class="eyebrow">Hardware wake</span><h2>${heading}</h2><p>${detail}</p></div>
         <div class="wake-actions">
-          <button class="primary-button" data-wake="enable" ${enabled || busy ? 'disabled' : ''}><i data-lucide="power"></i><span>Enable</span></button>
-          <button class="secondary-button" data-wake="disable" ${!wake.installed || !enabled || busy ? 'disabled' : ''}><i data-lucide="power-off"></i><span>Disable</span></button>
-          <button class="quiet-button" data-wake="restore" ${!wake.installed || busy ? 'disabled' : ''}><i data-lucide="rotate-ccw"></i><span>Restore baseline</span></button>
+          <label class="wake-toggle ${!support.manageable || busy ? 'disabled' : ''}">
+            <span><strong>Allow docks to wake this computer</strong><small>${outOfSync ? 'Policy is on; sources need applying' : enabled ? 'Hardware wake is active' : 'Hardware wake is off'}</small></span>
+            <input type="checkbox" data-wake-toggle ${enabled ? 'checked' : ''} ${!support.manageable || busy ? 'disabled' : ''} />
+            <span class="switch" aria-hidden="true"></span>
+          </label>
+          ${outOfSync ? `<button class="primary-button" data-wake="enable" ${busy ? 'disabled' : ''}><i data-lucide="refresh-cw"></i><span>Reapply</span></button>` : ''}
+          <button class="quiet-button" data-wake="restore" ${!support.manageable || !wake.installed || busy ? 'disabled' : ''}><i data-lucide="rotate-ccw"></i><span>Restore baseline</span></button>
         </div>
+        <div class="wake-protection">
+          <i data-lucide="shield-check"></i>
+          <span><strong>Automatic sleep protection</strong><small>${escapeHTML(protection.detail)}</small></span>
+          <span class="status-badge ${protection.good ? 'good' : ''}">${escapeHTML(protection.label)}</span>
+        </div>
+        ${!support.manageable ? `<div class="wake-setup"><i data-lucide="shield-alert"></i><span><strong>Packaged support is not installed</strong><small>Missing: ${escapeHTML((support.missing || []).join(', ') || 'system wake components')}</small></span><button class="secondary-button" data-action="refresh" ${busy ? 'disabled' : ''}><i data-lucide="refresh-cw"></i><span>Recheck</span></button></div>` : ''}
       </section>
       <section class="surface wake-sources">
-        <div class="section-heading"><h2>Eligible controllers</h2><span class="count-badge">${wake.sources.length}</span></div>
+        <div class="section-heading"><h2>Eligible wake sources</h2><span class="count-badge">${wake.sources.length}</span></div>
         <div class="source-table" role="table">
           <div class="source-head" role="row"><span>Controller</span><span>Class</span><span>State</span></div>
           ${wake.sources.length ? wake.sources.map((source) => `
@@ -464,6 +515,8 @@ function bindEvents() {
   }));
   document.querySelectorAll('[data-approve]').forEach((control) => control.addEventListener('change', () => approveDisplay(control.dataset.approve, control.checked)));
   document.querySelectorAll('[data-wake]').forEach((button) => button.addEventListener('click', () => wakeAction(button.dataset.wake)));
+  document.querySelectorAll('[data-wake-toggle]').forEach((toggle) => toggle.addEventListener('change', () => wakeAction(toggle.checked ? 'enable' : 'disable')));
+  document.querySelectorAll('[data-startup-toggle]').forEach((toggle) => toggle.addEventListener('change', () => setStartupEnabled(toggle.checked)));
   document.querySelectorAll('[data-action]').forEach((button) => button.addEventListener('click', () => handleAction(button.dataset.action)));
 }
 
@@ -527,6 +580,14 @@ async function wakeAction(action) {
     state = await callBackend('WakeAction', action);
     resetDraft();
     showToast(action === 'restore' ? 'Wake baseline restored' : `Hardware wake ${action}d`);
+  });
+}
+
+async function setStartupEnabled(enabled) {
+  await runBusy(async () => {
+    state = await callBackend('SetStartupEnabled', enabled);
+    resetDraft();
+    showToast(enabled ? 'Dockstar will start when you sign in' : 'Dockstar startup disabled');
   });
 }
 
@@ -666,6 +727,7 @@ function outcomePreview() {
     if (draft.network.policy === 'prefer-wired') dock.push('Prefer a wired connection');
     if (draft.network.policy === 'wired-only') dock.push('Disable wireless networking');
     if (draft.power.onAcProfile !== 'unchanged') dock.push(`Use ${draft.power.onAcProfile.replace('-', ' ')} power profile`);
+    if (draft.power.keepAwakeWhileDocked) dock.push('Prevent automatic sleep while docked');
   }
   const undock = [];
   if (draft.audio.restore) undock.push('Restore the previous audio output');
@@ -676,7 +738,36 @@ function outcomePreview() {
   return { dock, undock };
 }
 
+function sleepProtectionSummary() {
+  const protection = state.status.sleepProtection || {
+    enabled: Boolean(draft?.power?.keepAwakeWhileDocked), active: false, phase: 'inactive', backend: 'none', degraded: false,
+  };
+  if (!protection.enabled) {
+    return { label: 'Disabled', detail: 'Dockstar will follow the desktop sleep policy', good: false, warning: '' };
+  }
+  if (protection.lastError && !protection.active) {
+    return { label: 'Unavailable', detail: protection.lastError, good: false, warning: protection.lastError };
+  }
+  if (!protection.active) {
+    return { label: 'Ready', detail: 'Activates automatically for an approved dock', good: true, warning: '' };
+  }
+  if (protection.backend === 'logind') {
+    const warning = protection.degraded
+      ? 'Compatibility protection is active because Plasma sleep protection is unavailable. Manual Sleep may be blocked while docked.'
+      : '';
+    return { label: protection.degraded ? 'Compatibility mode' : 'Starting', detail: 'Automatic sleep is currently blocked through logind', good: true, warning };
+  }
+  if (protection.phase === 'resume-grace') {
+    return { label: 'Resume guard', detail: 'Waiting briefly for the approved dock to appear', good: true, warning: '' };
+  }
+  if (protection.phase === 'undock-grace') {
+    return { label: 'Disconnect guard', detail: 'Keeping the session stable while the dock disconnects', good: true, warning: '' };
+  }
+  return { label: 'Active', detail: 'Plasma automatic sleep is blocked while this dock is active', good: true, warning: '' };
+}
+
 function wakeClass(value) {
+	if (value === 'usb-root-hub') return 'USB root hub';
   if (String(value).startsWith('0x03')) return 'Display controller';
   if (String(value).startsWith('0x0c03')) return 'USB controller';
   return value || 'Controller';
@@ -695,15 +786,16 @@ function demoState() {
   return {
     revision: 8,
     config: {
-      schemaVersion: 1, revision: 8, detection: 'allowlist', defaultLayout: 'extend', lidClosedLayout: 'external-only',
+      schemaVersion: 2, revision: 8, detection: 'allowlist', defaultLayout: 'extend', lidClosedLayout: 'external-only',
       mirror: { source: 'primary-external', fallbackMaxRefreshHz: 60 },
       audio: { policy: 'prefer-display', restore: true }, network: { policy: 'prefer-wired' },
-      power: { onAcProfile: 'performance', restore: true },
+      power: { onAcProfile: 'performance', restore: true, keepAwakeWhileDocked: true },
       security: { lockOnClosedUndock: true, suspendOnClosedUndock: true }, wake: { enabled: true },
       displays: [{ id: 'GSM-5B09-A1C83F', label: 'LG UltraFine', allowed: true, primaryRank: 10, scale: 1, mode: 'ext-4k', position: 'right' }],
     },
     status: {
       docked: true, lidClosed: false, layout: 'extend', primary: 'GSM-5B09-A1C83F', backend: 'KScreen', updated: now,
+      sleepProtection: { enabled: true, active: true, phase: 'docked', backend: 'powerdevil', degraded: false },
       outputs: [
         { id: 1, deviceId: 'eDP-1-panel', connector: 'eDP-1', label: 'Laptop display', panel: true, connected: true, enabled: true, approved: true, priority: 2, scale: 1.5, width: 2560, height: 1600, currentModeId: 'panel-native', modes: [{ id: 'panel-native', width: 2560, height: 1600, refreshHz: 120 }] },
         { id: 2, deviceId: 'GSM-5B09-A1C83F', connector: 'DisplayPort-1', label: 'LG UltraFine', panel: false, connected: true, enabled: true, approved: true, priority: 1, scale: 1, width: 3840, height: 2160, currentModeId: 'ext-4k', modes: [{ id: 'ext-4k', width: 3840, height: 2160, refreshHz: 60 }, { id: 'ext-1440', width: 2560, height: 1440, refreshHz: 60 }] },
@@ -713,6 +805,8 @@ function demoState() {
       { id: 'pci:0000:00:0d.0', class: '0x0c0330', vendor: '0x8086', device: '0x9a13', state: 'enabled', managed: true },
       { id: 'pci:0000:03:00.0', class: '0x030000', vendor: '0x1002', device: '0x73df', state: 'enabled', managed: true },
     ] },
+    wakeSupport: { manageable: true, persistent: true, missing: [] },
+    startup: { enabled: true, serviceEnabled: true, trayEnabled: true },
   };
 }
 

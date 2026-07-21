@@ -18,9 +18,11 @@ automation continues when the UI is closed.
 - Use a separate closed-lid layout.
 - Prefer display audio, wired networking, and an AC power profile while docked,
   then restore the previous state on undock.
+- Prevent automatic lid and idle sleep while an approved dock is active,
+  without requiring users to change their Plasma power profile.
 - Lock and suspend after a closed-lid undock.
-- Optionally enable eligible PCI display, USB, and Thunderbolt controllers as
-  hardware wake sources through a narrowly scoped Polkit helper.
+- Optionally enable eligible PCI display, USB, and Thunderbolt controllers plus
+  USB root hubs as hardware wake sources through a narrowly scoped Polkit helper.
 - Inspect and control the daemon through D-Bus, JSON CLI output, or the settings
   window.
 

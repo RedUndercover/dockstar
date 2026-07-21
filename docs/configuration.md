@@ -20,7 +20,7 @@ previous config.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "revision": 1,
   "detection": "allowlist",
   "defaultLayout": "extend",
@@ -38,11 +38,12 @@ previous config.
   },
   "power": {
     "onAcProfile": "performance",
-    "restore": true
+    "restore": true,
+    "keepAwakeWhileDocked": true
   },
   "security": {
-    "lockOnClosedUndock": true,
-    "suspendOnClosedUndock": true
+    "lockOnClosedUndock": false,
+    "suspendOnClosedUndock": false
   },
   "wake": {
     "enabled": false
@@ -58,7 +59,7 @@ fresh installation.
 
 | Field | Type | Values and behavior |
 | --- | --- | --- |
-| `schemaVersion` | integer | Must be `1` |
+| `schemaVersion` | integer | Must be `2`; schema 1 is upgraded automatically when loaded |
 | `revision` | unsigned integer | Must be greater than zero; incremented on every managed write |
 | `detection` | string | `allowlist`, `all`, or `off` |
 | `defaultLayout` | string | Layout used while the lid is open |
@@ -118,17 +119,32 @@ matching sink reported by `pactl`.
 Profiles are changed only when a power supply of type `Mains` reports online.
 `restore` controls whether the pre-dock profile is restored on undock.
 
+`keepAwakeWhileDocked` defaults to `true`. While an approved external display
+keeps Dockstar in the docked state, the daemon prevents automatic idle and lid
+sleep. On Plasma it uses PowerDevil's native session inhibition, so an explicit
+**Sleep** command remains available. A short logind inhibitor covers
+PowerDevil's startup delay and acts as a compatibility fallback when PowerDevil
+is unavailable. Dockstar never rewrites Plasma power settings,
+`logind.conf`, or PAM configuration.
+
+Protection is released on normal undock, when detection is turned off, when
+this field is disabled, and when the daemon exits. A five-second closed-lid
+undock guard absorbs display disconnect churn. An intentional Dockstar
+closed-lid suspend releases protection before requesting suspend.
+
 ## Security object
 
 `lockOnClosedUndock` locks through `org.freedesktop.ScreenSaver` when an active
 dock is removed while the lid is closed. `suspendOnClosedUndock` requests
 logind suspend after the lock. In the current state machine, suspend is nested
 under the lock condition; enabling suspend while disabling lock does not
-suspend.
+suspend. Both settings default to `false`. Once a closed-lid undock triggers
+the action, Dockstar will not trigger it again until the lid has been opened;
+this prevents a flapping dock connection from creating a lock/suspend loop.
 
 ## Wake object
 
-`wake.enabled` is present in schema version 1 for UI/config compatibility but
+`wake.enabled` is retained for UI/config compatibility but
 is not consulted by the privileged helper. The authoritative system wake
 policy is `/etc/dockstar/wake.json`, and live state comes from each controller's
 `power/wakeup` sysfs file. Use `dockstar wake` commands rather than manually
@@ -160,7 +176,7 @@ Example:
 | `scale` | number | From 0.5 through 4; applied to non-mirror external layouts |
 | `mode` | string | `preferred` or a value accepted by `kscreen-doctor output.NAME.mode.VALUE` |
 | `position` | string | `left`, `right`, `above`, or `below` |
-| `audioSink` | string | Reserved in schema version 1; current audio selection does not consult it |
+| `audioSink` | string | Reserved; current audio selection does not consult it |
 
 Device IDs must be unique. Mode strings are passed to KScreen and are not
 validated beyond being strings, so inspect `dockstar devices` before setting a
@@ -191,6 +207,13 @@ The UI and `UpdateConfig` D-Bus method use optimistic concurrency:
 
 Convenience methods such as `allow`, `deny`, `trust`, and `mode` update under
 the store lock and always increment the current revision.
+
+## Schema migration
+
+Dockstar accepts schema 1 configuration files, upgrades them to schema 2, sets
+`power.keepAwakeWhileDocked` to `true`, advances the revision once, and writes
+the migrated file atomically. Newer unknown schemas remain an error. The
+migration does not edit any desktop or system power configuration.
 
 ## Editing by hand
 

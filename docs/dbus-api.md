@@ -55,7 +55,13 @@ timeout; the bundled CLI uses 30 seconds.
 | `lastError` | string | Most recent evaluation error; omitted when empty |
 | `backend` | string | Display backend name |
 | `outputs` | array | Complete normalized output records |
+| `sleepProtection` | object | Current automatic-sleep protection state and backend |
 | `updated` | RFC 3339 timestamp | Time the state record was built |
+
+`sleepProtection` contains `enabled`, `active`, `phase`, `backend`,
+`degraded`, and optional `lastError`. Phases are `inactive`, `docked`,
+`resume-grace`, or `undock-grace`. Backends are `none`, `powerdevil`, or
+`logind`; `logind` with `degraded: true` is compatibility fallback mode.
 
 ### Configuration
 

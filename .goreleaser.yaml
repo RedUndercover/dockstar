@@ -69,7 +69,7 @@ nfpms:
     license: MIT
     formats: [archlinux, deb, rpm]
     bindir: /usr/bin
-    dependencies: [webkit2gtk-4.1, gtk3]
+    dependencies: [webkit2gtk-4.1, gtk3, polkit]
     contents:
       - src: packaging/systemd/dockstar.service
         dst: /usr/lib/systemd/user/dockstar.service
@@ -119,11 +119,14 @@ nfpms:
         type: tree
     overrides:
       deb:
-        dependencies: [libwebkit2gtk-4.1-0, libgtk-3-0]
+        dependencies: [libwebkit2gtk-4.1-0, libgtk-3-0, policykit-1]
       rpm:
-        dependencies: [webkit2gtk4.1, gtk3]
+        dependencies: [webkit2gtk4.1, gtk3, polkit]
       archlinux:
-        dependencies: [webkit2gtk-4.1, gtk3]
+        dependencies: [webkit2gtk-4.1, gtk3, polkit]
+    archlinux:
+      scripts:
+        postupgrade: packaging/scripts/postinstall.sh
     scripts:
       postinstall: packaging/scripts/postinstall.sh
       preremove: packaging/scripts/preremove.sh

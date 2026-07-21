@@ -26,6 +26,7 @@ sequenceDiagram
     participant DRM as DRM and KWin
     participant D as daemon
     participant K as kscreen-doctor
+    participant I as sleep inhibitor
     participant P as platform actions
     participant U as UI or CLI
     DRM-->>D: visible in next two-second snapshot
@@ -34,6 +35,7 @@ sequenceDiagram
         D-->>U: PendingDisplay(id, label)
         D->>D: remain undocked
     else approved external
+        D->>I: acquire docked protection
         D->>K: DPMS on
         D->>K: atomic layout transaction
         K-->>D: success
@@ -47,9 +49,11 @@ as approved; Apply forces the same transition immediately.
 
 ## Resume
 
-logind emits `PrepareForSleep(false)`. The daemon waits 750 ms, then performs a
-forced evaluation. This lets the same path handle a dock connected during
-suspend.
+logind emits `PrepareForSleep(false)`. If hardware wake and user sleep
+protection are enabled, the daemon immediately acquires a resume guard. It
+checks after 250 ms, every 500 ms for five seconds, and then every second for a
+maximum of 20 seconds. An approved display turns the guard into docked
+protection; otherwise the guard expires.
 
 The system wake helper is earlier in the chain: firmware and a controller must
 wake the CPU before logind can emit the resume signal.
@@ -63,7 +67,9 @@ When a previously docked state has no approved external output:
 3. Re-enable Wi-Fi only if Dockstar disabled it.
 4. If the lid is closed and lock is enabled, lock the session.
 5. If suspend is also enabled, request suspend after 500 ms.
-6. Store and emit undocked state.
+6. Release sleep protection, except for the five-second closed-lid disconnect
+   guard. Intentional Dockstar suspend releases immediately.
+7. Store and emit undocked state.
 
 ## Mirror path
 

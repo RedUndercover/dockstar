@@ -14,6 +14,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/redundercover/dockstar/internal/config"
 	"github.com/redundercover/dockstar/internal/display"
+	"github.com/redundercover/dockstar/internal/inhibit"
 	"github.com/redundercover/dockstar/internal/platform"
 	"github.com/redundercover/dockstar/internal/wake"
 )
@@ -26,38 +27,91 @@ type EventEmitter interface {
 }
 
 type State struct {
-	Docked    bool             `json:"docked"`
-	LidClosed bool             `json:"lidClosed"`
-	Layout    string           `json:"layout"`
-	Primary   string           `json:"primary"`
-	LastError string           `json:"lastError,omitempty"`
-	Backend   string           `json:"backend"`
-	Outputs   []display.Output `json:"outputs"`
-	Updated   time.Time        `json:"updated"`
+	Docked          bool             `json:"docked"`
+	LidClosed       bool             `json:"lidClosed"`
+	Layout          string           `json:"layout"`
+	Primary         string           `json:"primary"`
+	LastError       string           `json:"lastError,omitempty"`
+	Backend         string           `json:"backend"`
+	Outputs         []display.Output `json:"outputs"`
+	SleepProtection inhibit.Status   `json:"sleepProtection"`
+	Updated         time.Time        `json:"updated"`
+}
+
+type sleepProtector interface {
+	Ensure(context.Context, string) inhibit.Status
+	Release(context.Context) inhibit.Status
+	Close() error
+}
+
+type platformActions interface {
+	Dock(context.Context, config.Config) error
+	Undock(context.Context, config.Config) error
 }
 
 type Controller struct {
-	store    *config.Store
-	displays display.Backend
-	actions  *platform.Manager
-	log      *slog.Logger
+	store             *config.Store
+	displays          display.Backend
+	actions           platformActions
+	log               *slog.Logger
+	lidClosed         func(context.Context) (bool, error)
+	wakePolicyEnabled func(string) (bool, error)
 
-	mu        sync.RWMutex
-	state     State
-	emitter   EventEmitter
-	signature string
+	mu          sync.RWMutex
+	state       State
+	emitter     EventEmitter
+	signatureMu sync.Mutex
+	signature   string
+	signatureID uint64
+	evaluate    sync.Mutex
+	undock      closedUndockGuard
+	protector   sleepProtector
+	timingMu    sync.Mutex
+	resumeUntil time.Time
+	undockUntil time.Time
+	now         func() time.Time
+}
+
+const (
+	resumeProtectionWindow = 20 * time.Second
+	undockProtectionWindow = 5 * time.Second
+)
+
+type closedUndockGuard struct {
+	handled bool
+}
+
+func (g *closedUndockGuard) ShouldRun(wasDocked, docked, lidClosed, enabled bool) bool {
+	if !lidClosed {
+		g.handled = false
+	}
+	if !enabled || !wasDocked || docked || !lidClosed || g.handled {
+		return false
+	}
+	g.handled = true
+	return true
 }
 
 func New(store *config.Store, displays display.Backend, logger *slog.Logger) *Controller {
+	return newController(store, displays, logger, inhibit.New())
+}
+
+func newController(store *config.Store, displays display.Backend, logger *slog.Logger, protector sleepProtector) *Controller {
 	return &Controller{
 		store: store, displays: displays, actions: &platform.Manager{}, log: logger,
-		state: State{Backend: displays.Name(), Updated: time.Now().UTC()},
+		protector: protector, now: time.Now, lidClosed: platform.LidClosed, wakePolicyEnabled: wake.PolicyEnabled,
+		state: State{Backend: displays.Name(), SleepProtection: inhibit.Status{Phase: "inactive", Backend: "none"}, Updated: time.Now().UTC()},
 	}
 }
 
 func (c *Controller) SetEmitter(emitter EventEmitter) { c.emitter = emitter }
 
 func (c *Controller) Run(ctx context.Context) error {
+	defer func() {
+		if err := c.protector.Close(); err != nil {
+			c.log.Debug("release sleep protection", "error", err)
+		}
+	}()
 	resume := make(chan struct{}, 1)
 	go c.watchSleep(ctx, resume)
 	if err := c.Evaluate(ctx, false); err != nil {
@@ -70,10 +124,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-resume:
-			time.Sleep(750 * time.Millisecond)
-			if err := c.Evaluate(ctx, true); err != nil {
-				c.log.Warn("resume evaluation failed", "error", err)
-			}
+			c.pollResume(ctx)
 		case <-ticker.C:
 			if err := c.Evaluate(ctx, false); err != nil {
 				c.log.Debug("display evaluation failed", "error", err)
@@ -83,22 +134,20 @@ func (c *Controller) Run(ctx context.Context) error {
 }
 
 func (c *Controller) Evaluate(ctx context.Context, force bool) error {
+	c.evaluate.Lock()
+	defer c.evaluate.Unlock()
+
+	signatureID := c.currentSignatureID()
 	cfg := c.store.Get()
 	snapshot, err := c.displays.Snapshot(ctx, cfg)
 	if err != nil {
 		c.setError(err)
 		return err
 	}
-	lidClosed, lidErr := platform.LidClosed(ctx)
+	lidClosed, lidErr := c.lidClosed(ctx)
 	if lidErr != nil {
 		c.log.Debug("lid state unavailable", "error", lidErr)
 	}
-	sig := display.Signature(snapshot) + fmt.Sprintf(":lid=%t", lidClosed)
-	if !force && sig == c.signature {
-		return nil
-	}
-	c.signature = sig
-
 	var approvedExternal, pending []display.Output
 	for _, output := range snapshot.Outputs {
 		if !output.Connected || output.Panel {
@@ -110,17 +159,26 @@ func (c *Controller) Evaluate(ctx context.Context, force bool) error {
 			pending = append(pending, output)
 		}
 	}
+	c.mu.RLock()
+	wasDocked := c.state.Docked
+	c.mu.RUnlock()
+	docked := cfg.Detection != "off" && len(approvedExternal) > 0
+	runClosedUndock := c.undock.ShouldRun(wasDocked, docked, lidClosed, cfg.Security.LockOnClosedUndock)
+	intentionalSuspend := runClosedUndock && cfg.Security.SuspendOnClosedUndock
+	protection := c.reconcileProtection(ctx, cfg, wasDocked, docked, lidClosed, intentionalSuspend)
+
+	sig := display.Signature(snapshot) + fmt.Sprintf(":lid=%t", lidClosed)
+	if !c.shouldEvaluateSignature(sig, signatureID, force) {
+		c.storeProtection(protection)
+		return nil
+	}
 	for _, output := range pending {
 		if c.emitter != nil {
 			_ = c.emitter.PendingDisplay(output.DeviceID, output.Label)
 		}
 	}
 
-	c.mu.RLock()
-	wasDocked := c.state.Docked
-	c.mu.RUnlock()
-	docked := cfg.Detection != "off" && len(approvedExternal) > 0
-	state := State{Docked: docked, LidClosed: lidClosed, Backend: c.displays.Name(), Outputs: snapshot.Outputs, Updated: time.Now().UTC()}
+	state := State{Docked: docked, LidClosed: lidClosed, Backend: c.displays.Name(), Outputs: snapshot.Outputs, SleepProtection: protection, Updated: time.Now().UTC()}
 	if docked {
 		layout := cfg.DefaultLayout
 		if lidClosed {
@@ -146,7 +204,7 @@ func (c *Controller) Evaluate(ctx context.Context, force bool) error {
 		if err := c.actions.Undock(ctx, cfg); err != nil {
 			c.log.Warn("one or more undock actions failed", "error", err)
 		}
-		if lidClosed && cfg.Security.LockOnClosedUndock {
+		if runClosedUndock {
 			if err := platform.Lock(ctx); err != nil {
 				c.log.Warn("screen lock failed", "error", err)
 			}
@@ -186,7 +244,15 @@ func (c *Controller) UpdateConfig(raw string, revision uint64) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	c.signature = ""
+	c.invalidateSignature()
+	if !updated.Power.KeepAwakeWhileDocked {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		status := c.protector.Release(ctx)
+		status.Enabled = false
+		c.clearProtectionWindows()
+		c.storeProtection(status)
+	}
 	return updated.Revision, nil
 }
 
@@ -224,7 +290,7 @@ func (c *Controller) ApproveDisplay(id string, allowed bool) error {
 		return nil
 	})
 	if err == nil {
-		c.signature = ""
+		c.invalidateSignature()
 	}
 	return err
 }
@@ -235,15 +301,23 @@ func (c *Controller) SetTrustPolicy(policy string) error {
 		return nil
 	})
 	if err == nil {
-		c.signature = ""
+		c.invalidateSignature()
 	}
 	return err
 }
 
 func (c *Controller) Reload() error {
-	_, err := c.store.Reload()
+	updated, err := c.store.Reload()
 	if err == nil {
-		c.signature = ""
+		c.invalidateSignature()
+		if !updated.Power.KeepAwakeWhileDocked {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			status := c.protector.Release(ctx)
+			status.Enabled = false
+			c.clearProtectionWindows()
+			c.storeProtection(status)
+		}
 	}
 	return err
 }
@@ -278,6 +352,10 @@ func (c *Controller) storeState(state State) {
 	c.mu.Lock()
 	c.state = state
 	c.mu.Unlock()
+	c.publishState(state)
+}
+
+func (c *Controller) publishState(state State) {
 	raw, _ := marshal(state)
 	if runtimeDir := os.Getenv("XDG_RUNTIME_DIR"); runtimeDir != "" {
 		dir := filepath.Join(runtimeDir, "dockstar")
@@ -288,6 +366,19 @@ func (c *Controller) storeState(state State) {
 	if c.emitter != nil {
 		_ = c.emitter.StateChanged(raw)
 	}
+}
+
+func (c *Controller) storeProtection(status inhibit.Status) {
+	c.mu.Lock()
+	if c.state.SleepProtection == status {
+		c.mu.Unlock()
+		return
+	}
+	c.state.SleepProtection = status
+	c.state.Updated = c.now().UTC()
+	state := c.state
+	c.mu.Unlock()
+	c.publishState(state)
 }
 
 func (c *Controller) setError(err error) {
@@ -325,6 +416,7 @@ func (c *Controller) watchSleep(ctx context.Context, resumed chan<- struct{}) {
 		case signal := <-signals:
 			if len(signal.Body) == 1 {
 				if sleeping, ok := signal.Body[0].(bool); ok && !sleeping {
+					c.beginResumeProtection(ctx)
 					select {
 					case resumed <- struct{}{}:
 					default:
@@ -333,6 +425,138 @@ func (c *Controller) watchSleep(ctx context.Context, resumed chan<- struct{}) {
 			}
 		}
 	}
+}
+
+func (c *Controller) beginResumeProtection(ctx context.Context) {
+	cfg := c.store.Get()
+	if !cfg.Power.KeepAwakeWhileDocked {
+		return
+	}
+	enabled, err := c.wakePolicyEnabled("")
+	if err != nil || !enabled {
+		return
+	}
+	c.timingMu.Lock()
+	c.resumeUntil = c.now().Add(resumeProtectionWindow)
+	c.timingMu.Unlock()
+	guardCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	c.storeProtection(c.protector.Ensure(guardCtx, "resume-grace"))
+}
+
+func (c *Controller) pollResume(ctx context.Context) {
+	started := c.now()
+	delay := 250 * time.Millisecond
+	force := true
+	for {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if err := c.Evaluate(ctx, force); err != nil {
+			c.log.Debug("resume display evaluation failed", "error", err)
+		}
+		force = false
+		c.mu.RLock()
+		docked := c.state.Docked
+		c.mu.RUnlock()
+		if docked {
+			return
+		}
+		if c.now().Sub(started) >= resumeProtectionWindow {
+			c.timingMu.Lock()
+			c.resumeUntil = time.Time{}
+			c.timingMu.Unlock()
+			status := c.protector.Release(ctx)
+			status.Enabled = c.store.Get().Power.KeepAwakeWhileDocked
+			c.storeProtection(status)
+			return
+		}
+		if c.now().Sub(started) < 5*time.Second {
+			delay = 500 * time.Millisecond
+		} else {
+			delay = time.Second
+		}
+	}
+}
+
+func (c *Controller) reconcileProtection(ctx context.Context, cfg config.Config, wasDocked, docked, lidClosed, intentionalSuspend bool) inhibit.Status {
+	if !cfg.Power.KeepAwakeWhileDocked {
+		c.clearProtectionWindows()
+		status := c.protector.Release(ctx)
+		status.Enabled = false
+		return status
+	}
+
+	now := c.now()
+	c.timingMu.Lock()
+	if docked {
+		c.resumeUntil = time.Time{}
+		c.undockUntil = time.Time{}
+	} else if intentionalSuspend {
+		c.resumeUntil = time.Time{}
+		c.undockUntil = time.Time{}
+	} else if wasDocked && lidClosed {
+		c.undockUntil = now.Add(undockProtectionWindow)
+	}
+	resumeActive := now.Before(c.resumeUntil)
+	undockActive := now.Before(c.undockUntil)
+	if !resumeActive {
+		c.resumeUntil = time.Time{}
+	}
+	if !undockActive {
+		c.undockUntil = time.Time{}
+	}
+	c.timingMu.Unlock()
+
+	switch {
+	case docked:
+		return c.protector.Ensure(ctx, "docked")
+	case resumeActive:
+		return c.protector.Ensure(ctx, "resume-grace")
+	case undockActive:
+		return c.protector.Ensure(ctx, "undock-grace")
+	default:
+		status := c.protector.Release(ctx)
+		status.Enabled = true
+		return status
+	}
+}
+
+func (c *Controller) clearProtectionWindows() {
+	c.timingMu.Lock()
+	c.resumeUntil = time.Time{}
+	c.undockUntil = time.Time{}
+	c.timingMu.Unlock()
+}
+
+func (c *Controller) currentSignatureID() uint64 {
+	c.signatureMu.Lock()
+	defer c.signatureMu.Unlock()
+	return c.signatureID
+}
+
+func (c *Controller) shouldEvaluateSignature(signature string, id uint64, force bool) bool {
+	c.signatureMu.Lock()
+	defer c.signatureMu.Unlock()
+	if id != c.signatureID {
+		return true
+	}
+	if !force && c.signature == signature {
+		return false
+	}
+	c.signature = signature
+	return true
+}
+
+func (c *Controller) invalidateSignature() {
+	c.signatureMu.Lock()
+	c.signatureID++
+	c.signature = ""
+	c.signatureMu.Unlock()
 }
 
 func marshal(value any) (string, error) {

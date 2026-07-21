@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -9,6 +11,57 @@ import (
 func TestDefaultIsValid(t *testing.T) {
 	if err := Default().Validate(); err != nil {
 		t.Fatalf("Default().Validate() = %v", err)
+	}
+}
+
+func TestDecodeMigratesSchemaOneWithDockProtectionEnabled(t *testing.T) {
+	t.Parallel()
+	legacy := Default()
+	legacy.SchemaVersion = 1
+	legacy.Revision = 7
+	legacy.Power.KeepAwakeWhileDocked = false
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, migrated, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated || got.SchemaVersion != 2 || got.Revision != 8 || !got.Power.KeepAwakeWhileDocked {
+		t.Fatalf("Decode() = %+v, migrated=%t", got, migrated)
+	}
+}
+
+func TestOpenPersistsMigratedConfiguration(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := Default()
+	legacy.SchemaVersion = 1
+	legacy.Revision = 3
+	legacy.Power.KeepAwakeWhileDocked = false
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Get(); got.SchemaVersion != 2 || got.Revision != 4 || !got.Power.KeepAwakeWhileDocked {
+		t.Fatalf("migrated config = %+v", got)
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, migrated, err := Decode(persisted); err != nil || migrated || got.SchemaVersion != 2 {
+		t.Fatalf("persisted Decode() = %+v, migrated=%t, err=%v", got, migrated, err)
 	}
 }
 

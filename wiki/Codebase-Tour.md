@@ -30,6 +30,10 @@ transaction.
 `internal/platform/actions.go` contains every external command and desktop
 D-Bus call. Its `Manager` remembers exactly what should be restored.
 
+Read `internal/inhibit/inhibit.go` next. Its coordinator owns PowerDevil and
+logind leases, warmup verification, fallback, retry, and cleanup. The daemon
+decides when those leases should exist; the package decides how to hold them.
+
 ### 6. Public API
 
 `internal/ipc/server.go` is the wire contract. `internal/ipc/client.go` is the
@@ -56,7 +60,8 @@ cmd/dockstar --------> config, daemon, display, ipc, wake
 cmd/dockstar-ui -----> config, daemon models, ipc, Wails
 cmd/wake-helper -----> wake
 
-daemon -------------> config, display contract, platform, wake status
+daemon -------------> config, display contract, inhibit, platform, wake status
+inhibit ------------> PowerDevil and logind D-Bus APIs
 display ------------> config, generated protocol
 ipc ----------------> config error identity and daemon Handler contract
 platform -----------> config

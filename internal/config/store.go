@@ -47,11 +47,15 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-	if err := json.Unmarshal(data, &s.cfg); err != nil {
+	next, migrated, err := Decode(data)
+	if err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
 	}
-	if err := s.cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("validate config: %w", err)
+	s.cfg = next
+	if migrated {
+		if err := s.write(s.cfg); err != nil {
+			return nil, fmt.Errorf("write migrated config: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -108,12 +112,14 @@ func (s *Store) Reload() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	var next Config
-	if err := json.Unmarshal(data, &next); err != nil {
+	next, migrated, err := Decode(data)
+	if err != nil {
 		return Config{}, err
 	}
-	if err := next.Validate(); err != nil {
-		return Config{}, err
+	if migrated {
+		if err := s.write(next); err != nil {
+			return Config{}, err
+		}
 	}
 	s.cfg = clone(next)
 	return clone(next), nil

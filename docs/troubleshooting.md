@@ -56,9 +56,13 @@ dockstar config validate ~/.config/dockstar/config.json
 journalctl --user -u dockstar.service -b
 ```
 
-Restore valid JSON, schema version 1, a revision greater than zero, and valid
+Restore valid JSON, schema version 2, a revision greater than zero, and valid
 enum values. Duplicate display IDs and scales outside 0.5 through 4 are
 rejected.
+
+Schema 1 files are migrated automatically. If a manually edited schema 2 file
+is rejected, compare its `power` object with the complete example in the
+[Configuration Reference](configuration.md).
 
 ## External display is connected but nothing happens
 
@@ -225,6 +229,68 @@ cat /sys/power/mem_sleep
 Verify the controller for the physical path reports `enabled`. Test USB-C,
 Thunderbolt, direct HDMI, and direct DisplayPort separately. Firmware can ignore
 an enabled Linux wake source, especially in deep suspend.
+
+Hardware wake must already be possible before Dockstar can see the new display.
+The automatic sleep-protection toggle cannot compensate for firmware that does
+not generate a wake event.
+
+## Sleep protection is unavailable
+
+Inspect the daemon's structured status and both inhibition managers:
+
+```sh
+dockstar status | jq '.sleepProtection'
+qdbus6 org.kde.Solid.PowerManagement \
+  /org/kde/Solid/PowerManagement/PolicyAgent \
+  org.freedesktop.DBus.Properties.Get \
+  org.kde.Solid.PowerManagement.PolicyAgent ActiveInhibitions
+systemd-inhibit --list
+```
+
+`backend: "powerdevil"` is the normal Plasma path. `backend: "logind"` with
+`degraded: true` means compatibility protection is active; restart the user
+service after PowerDevil is available to retry immediately:
+
+```sh
+systemctl --user restart dockstar.service
+```
+
+An error saying the inhibition was blocked in Plasma means the user explicitly
+disabled Dockstar's inhibition in the battery applet. Dockstar respects that
+choice and does not use logind to bypass it. Re-enable Dockstar in Plasma's
+active-inhibition UI, or turn off **Keep computer awake while docked** in
+Dockstar.
+
+## Manual Sleep is blocked while docked
+
+In the normal `powerdevil` mode, explicit Plasma Sleep remains available. In
+`logind` compatibility mode, the lower-level inhibitor also blocks manual
+sleep. Turn off **Keep computer awake while docked** temporarily or restore
+PowerDevil and restart Dockstar. No global lid or suspend policy needs to be
+changed.
+
+## Login reports three failed attempts
+
+Dockstar does not submit passwords, synthesize authentication, change PAM, or
+retry login. Sleep protection is held through D-Bus inhibitor leases only. To
+separate a display-manager or authentication problem from Dockstar, disable
+startup and stop the current daemon session:
+
+```sh
+systemctl --user disable --now dockstar.service
+```
+
+Then inspect the boot's display-manager and authentication logs. Depending on
+the installed display manager, useful units include `sddm.service` and
+`systemd-logind.service`:
+
+```sh
+journalctl -b -u sddm.service -u systemd-logind.service
+```
+
+Re-enable Dockstar with `systemctl --user enable --now dockstar.service` after
+the authentication issue is understood. Toggling sleep protection off in the
+GUI releases an active Dockstar inhibitor immediately.
 
 ## Machine wakes too easily or uses more suspend power
 

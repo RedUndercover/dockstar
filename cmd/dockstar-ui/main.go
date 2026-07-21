@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,11 +36,41 @@ type App struct {
 }
 
 type UIState struct {
-	Config    config.Config `json:"config"`
-	Revision  uint64        `json:"revision"`
-	Status    daemon.State  `json:"status"`
-	Wake      wake.Status   `json:"wake"`
-	WakeError string        `json:"wakeError,omitempty"`
+	Config      config.Config `json:"config"`
+	Revision    uint64        `json:"revision"`
+	Status      daemon.State  `json:"status"`
+	Wake        wake.Status   `json:"wake"`
+	WakeSupport WakeSupport   `json:"wakeSupport"`
+	WakeError   string        `json:"wakeError,omitempty"`
+	Startup     StartupStatus `json:"startup"`
+}
+
+type WakeSupport struct {
+	Manageable bool     `json:"manageable"`
+	Persistent bool     `json:"persistent"`
+	Missing    []string `json:"missing,omitempty"`
+}
+
+type StartupStatus struct {
+	Enabled        bool   `json:"enabled"`
+	ServiceEnabled bool   `json:"serviceEnabled"`
+	TrayEnabled    bool   `json:"trayEnabled"`
+	Error          string `json:"error,omitempty"`
+}
+
+const trayAutostartName = "io.github.redundercover.Dockstar.Tray.desktop"
+
+var wakeSupportPaths = []struct {
+	path       string
+	label      string
+	executable bool
+	required   bool
+	persistent bool
+}{
+	{path: "/usr/bin/pkexec", label: "Polkit authorization broker", executable: true, required: true},
+	{path: "/usr/bin/dockstar-wake-helper", label: "privileged wake helper", executable: true, required: true},
+	{path: "/usr/share/polkit-1/actions/io.github.redundercover.Dockstar.policy", label: "Polkit policy", required: true},
+	{path: "/usr/lib/systemd/system-sleep/50-dockstar", label: "resume hook", executable: true, persistent: true},
 }
 
 func main() {
@@ -103,7 +135,11 @@ func (a *App) GetState() (UIState, error) {
 		return UIState{}, fmt.Errorf("load display status: %w", err)
 	}
 
-	state := UIState{Revision: revision}
+	state := UIState{
+		Revision:    revision,
+		WakeSupport: detectWakeSupport("/"),
+		Startup:     detectStartupStatus(),
+	}
 	if err := json.Unmarshal([]byte(rawConfig), &state.Config); err != nil {
 		return UIState{}, fmt.Errorf("decode configuration: %w", err)
 	}
@@ -162,6 +198,9 @@ func (a *App) WakeAction(action string) (UIState, error) {
 	if action != "enable" && action != "disable" && action != "restore" {
 		return UIState{}, fmt.Errorf("unsupported wake action %q", action)
 	}
+	if support := detectWakeSupport("/"); !support.Manageable {
+		return UIState{}, fmt.Errorf("hardware wake support is not installed; install the Dockstar system package, then try again")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, findDockstar(), "wake", action)
@@ -169,6 +208,179 @@ func (a *App) WakeAction(action string) (UIState, error) {
 		return UIState{}, fmt.Errorf("change wake sources: %w: %s", err, string(output))
 	}
 	return a.GetState()
+}
+
+func (a *App) SetStartupEnabled(enabled bool) (UIState, error) {
+	if err := setServiceStartup(enabled); err != nil {
+		return UIState{}, err
+	}
+	if err := setTrayStartup(enabled); err != nil {
+		return UIState{}, err
+	}
+	return a.GetState()
+}
+
+func detectStartupStatus() StartupStatus {
+	status := StartupStatus{}
+	var problems []string
+	serviceEnabled, err := serviceStartupEnabled()
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	trayEnabled, err := trayStartupEnabled()
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	status.ServiceEnabled = serviceEnabled
+	status.TrayEnabled = trayEnabled
+	status.Enabled = serviceEnabled && trayEnabled
+	status.Error = strings.Join(problems, "; ")
+	return status
+}
+
+func serviceStartupEnabled() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "systemctl", "--user", "is-enabled", "dockstar.service").CombinedOutput()
+	value := strings.TrimSpace(string(output))
+	if value == "enabled" || value == "enabled-runtime" {
+		return true, nil
+	}
+	if value == "disabled" || value == "masked" || value == "masked-runtime" || value == "not-found" {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check Dockstar startup: %s", value)
+	}
+	return false, nil
+}
+
+func setServiceStartup(enabled bool) error {
+	action := "disable"
+	if enabled {
+		action = "enable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if output, err := exec.CommandContext(ctx, "systemctl", "--user", action, "dockstar.service").CombinedOutput(); err != nil {
+		return fmt.Errorf("%s Dockstar at startup: %w: %s", action, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func trayStartupEnabled() (bool, error) {
+	userPath, err := trayAutostartPath()
+	if err != nil {
+		return false, err
+	}
+	data, err := os.ReadFile(userPath)
+	if err == nil {
+		return !desktopEntryHidden(data), nil
+	}
+	if !os.IsNotExist(err) {
+		return false, fmt.Errorf("read tray autostart entry: %w", err)
+	}
+	data, err = os.ReadFile(filepath.Join("/etc/xdg/autostart", trayAutostartName))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read system tray autostart entry: %w", err)
+	}
+	return !desktopEntryHidden(data), nil
+}
+
+func setTrayStartup(enabled bool) error {
+	path, err := trayAutostartPath()
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate Dockstar Settings: %w", err)
+	}
+	var hidden string
+	if !enabled {
+		hidden = "Hidden=true\n"
+	}
+	content := fmt.Sprintf(`[Desktop Entry]
+Type=Application
+Name=Dockstar Tray
+Icon=io.github.redundercover.Dockstar
+Exec=/usr/bin/env LC_ALL=en_US.UTF-8 %s
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+X-KDE-StartupNotify=false
+NoDisplay=true
+%s`, executable, hidden)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create autostart directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dockstar-autostart-*")
+	if err != nil {
+		return fmt.Errorf("create tray autostart entry: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("install tray autostart entry: %w", err)
+	}
+	return nil
+}
+
+func trayAutostartPath() (string, error) {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("locate user configuration: %w", err)
+	}
+	return filepath.Join(configDir, "autostart", trayAutostartName), nil
+}
+
+func desktopEntryHidden(data []byte) bool {
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if strings.EqualFold(strings.TrimSpace(string(line)), "Hidden=true") {
+			return true
+		}
+	}
+	return false
+}
+
+func detectWakeSupport(root string) WakeSupport {
+	if root == "" {
+		root = "/"
+	}
+	support := WakeSupport{}
+	support.Manageable = true
+	for _, component := range wakeSupportPaths {
+		path := filepath.Join(root, filepath.Clean(component.path))
+		info, err := os.Stat(path)
+		present := err == nil && info.Mode().IsRegular()
+		if present && component.executable {
+			present = info.Mode().Perm()&0o111 != 0
+		}
+		if !present {
+			support.Missing = append(support.Missing, component.label)
+			if component.required {
+				support.Manageable = false
+			}
+			continue
+		}
+		if component.persistent {
+			support.Persistent = true
+		}
+	}
+	return support
 }
 
 func (a *App) GetDiagnostics() (string, error) {

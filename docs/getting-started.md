@@ -66,7 +66,8 @@ make install-user
 ```
 
 The source installer places files under `~/.local`, installs and starts
-`dockstar.service`, and adds the tray to KDE autostart. It does not install the
+`dockstar.service`, and adds the tray to KDE autostart. Startup can then be
+changed from the Automation page in Dockstar Settings. It does not install the
 Polkit policy, system sleep hook, or root helper. Use a system package when
 hardware wake setup is required.
 

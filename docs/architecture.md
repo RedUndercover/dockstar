@@ -55,14 +55,15 @@ it never writes the configuration file directly.
 ### `dockstar-wake-helper`
 
 The helper has no D-Bus or display responsibilities. It validates one fixed
-action, discovers eligible PCI devices, and reads or writes only Dockstar policy
-files and derived sysfs wake paths.
+action, discovers eligible PCI controllers and USB root hubs, and reads or
+writes only Dockstar policy files and derived sysfs wake paths.
 
 ## Daemon state machine
 
 The controller evaluates once at startup, every two seconds, and after resume.
-Resume events come from logind `PrepareForSleep(false)` and are delayed 750 ms
-to let KWin and DRM settle.
+Resume events come from logind `PrepareForSleep(false)`. When hardware wake is
+enabled, the daemon immediately starts a bounded resume guard and polls quickly
+for up to 20 seconds while KWin and DRM rediscover the dock.
 
 ```mermaid
 stateDiagram-v2
@@ -87,14 +88,15 @@ force evaluation despite an unchanged signature.
 1. Load an immutable config copy from the store.
 2. Query `kscreen-doctor -j` and translate outputs into `display.Snapshot`.
 3. Query PowerDevil for lid state.
-4. Skip an unchanged signature unless forced.
-5. Separate approved and pending external outputs.
-6. Emit `PendingDisplay` for each pending output.
-7. Determine docked state and choose the normal or closed-lid layout.
-8. Request DPMS on, then apply the display transaction.
-9. On a new dock or forced apply, run platform dock actions.
-10. On undock, restore platform actions and optionally lock and suspend.
-11. Write runtime state and emit `StateChanged`.
+4. Separate approved and pending external outputs.
+5. Reconcile the sleep-protection lease, even when the display signature is unchanged.
+6. Skip the remaining work for an unchanged signature unless forced.
+7. Emit `PendingDisplay` for each pending output.
+8. Determine docked state and choose the normal or closed-lid layout.
+9. Request DPMS on, then apply the display transaction.
+10. On a new dock or forced apply, run platform dock actions.
+11. On undock, restore platform actions and optionally lock and suspend.
+12. Write runtime state and emit `StateChanged`.
 
 Display transaction failures update `lastError`, persist runtime state, emit
 `ApplyFailed`, and prevent dock actions for that evaluation.
@@ -179,6 +181,28 @@ parsed command output. Each child command receives a 15-second context.
 
 Lid, lock, and suspend operations use D-Bus instead of shell commands.
 
+## Sleep inhibition
+
+`internal/inhibit` owns two lease implementations behind a coordinator:
+
+- A native PowerDevil inhibitor on the session bus. It blocks automatic
+  `InterruptSession` policy while allowing an explicit Plasma Sleep action.
+- A logind `sleep` block inhibitor on the system bus. It bridges PowerDevil's
+  five-second policy-enforcement delay and remains as a degraded fallback when
+  PowerDevil cannot be reached.
+
+The coordinator verifies that Dockstar appears in PowerDevil's active
+inhibitions after a six-second warmup. If Plasma explicitly blocks Dockstar's
+inhibition, the coordinator releases the logind bridge and reports the
+protection unavailable instead of bypassing the user's decision. It retries an
+unavailable PowerDevil connection every five seconds and reacquires leases if
+either D-Bus owner restarts.
+
+The daemon holds protection only for an approved dock, a 20-second
+post-resume discovery window, or a five-second closed-lid disconnect window.
+All lease descriptors and D-Bus cookies are released on disable, ordinary
+undock, intentional suspend, cancellation, and daemon shutdown.
+
 ## D-Bus layer
 
 `internal/ipc.Server` exports a narrow `Handler` interface implemented by the
@@ -225,5 +249,8 @@ See [Hardware Wake](wake.md#privilege-boundary) and
 - Individual platform action failures are joined, logged as warnings, and do
   not roll back a successful display layout.
 - Failure to query lid state is logged at debug level and treated as open.
+- Failure to acquire PowerDevil falls back to a scoped logind inhibitor and is
+  reported in `sleepProtection`; failure of both backends leaves protection
+  inactive without changing system policy.
 - A missing wake policy makes the post-resume helper fail harmlessly because
   the sleep hook ignores its exit status.

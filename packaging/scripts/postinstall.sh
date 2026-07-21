@@ -1,3 +1,3 @@
 #!/bin/sh
-systemctl --global enable dockstar.service >/dev/null 2>&1 || true
-printf '%s\n' 'Dockstar installed. Hardware wake sources remain disabled until enabled in Dockstar Settings.'
+systemctl --global disable dockstar.service >/dev/null 2>&1 || true
+printf '%s\n' 'Dockstar installed. Startup and hardware wake can be enabled in Dockstar Settings.'

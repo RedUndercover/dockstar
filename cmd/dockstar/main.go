@@ -153,11 +153,7 @@ func configCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		var cfg config.Config
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return err
-		}
-		if err := cfg.Validate(); err != nil {
+		if _, _, err := config.Decode(data); err != nil {
 			return err
 		}
 		fmt.Println("configuration is valid")

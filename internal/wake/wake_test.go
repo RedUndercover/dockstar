@@ -36,6 +36,46 @@ func TestHelperRecordsAndRestoresBaseline(t *testing.T) {
 	assertFile(t, filepath.Join(device, "power/wakeup"), "disabled")
 }
 
+func TestHelperManagesUSBRootHubsAndExtendsBaseline(t *testing.T) {
+	root := t.TempDir()
+	pci := filepath.Join(root, "sys/bus/pci/devices/0000:00:0d.0")
+	writeWakeFixture(t, pci, map[string]string{
+		"class": "0x0c0330\n", "vendor": "0x8086\n", "device": "0x7ec0\n", "power/wakeup": "disabled\n",
+	})
+	if err := Helper("enable", root); err != nil {
+		t.Fatal(err)
+	}
+
+	rootHub := filepath.Join(root, "sys/bus/usb/devices/usb3")
+	writeWakeFixture(t, rootHub, map[string]string{
+		"idVendor": "0x1d6b\n", "idProduct": "0x0002\n", "power/wakeup": "disabled\n",
+	})
+	if err := Helper("enable", root); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(rootHub, "power/wakeup"), "enabled")
+
+	status, err := GetStatus(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Sources) != 2 || status.Sources[1].ID != "usb:usb3" {
+		t.Fatalf("status sources = %#v, want PCI controller and USB root hub", status.Sources)
+	}
+	if err := Helper("restore", root); err != nil {
+		t.Fatal(err)
+	}
+	assertFile(t, filepath.Join(pci, "power/wakeup"), "disabled")
+	assertFile(t, filepath.Join(rootHub, "power/wakeup"), "disabled")
+}
+
+func TestHelperRejectsInvalidUSBRootHub(t *testing.T) {
+	root := t.TempDir()
+	if err := set(root, "usb:../../etc", "enabled"); err == nil {
+		t.Fatal("invalid USB root hub should fail")
+	}
+}
+
 func TestHelperRejectsUnknownAction(t *testing.T) {
 	if err := Helper("surprise", t.TempDir()); err == nil {
 		t.Fatal("unknown helper action should fail")
@@ -50,5 +90,17 @@ func assertFile(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("%s = %q, want %q", path, data, want)
+	}
+}
+
+func writeWakeFixture(t *testing.T, directory string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(directory, "power"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range files {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(value), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

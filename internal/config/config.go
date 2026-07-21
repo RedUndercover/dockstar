@@ -1,12 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 type Config struct {
 	SchemaVersion   int           `json:"schemaVersion"`
@@ -38,8 +39,9 @@ type Network struct {
 }
 
 type Power struct {
-	OnACProfile string `json:"onAcProfile"`
-	Restore     bool   `json:"restore"`
+	OnACProfile          string `json:"onAcProfile"`
+	Restore              bool   `json:"restore"`
+	KeepAwakeWhileDocked bool   `json:"keepAwakeWhileDocked"`
 }
 
 type Security struct {
@@ -75,11 +77,42 @@ func Default() Config {
 		},
 		Audio:    Audio{Policy: "prefer-display", Restore: true},
 		Network:  Network{Policy: "prefer-wired"},
-		Power:    Power{OnACProfile: "performance", Restore: true},
-		Security: Security{LockOnClosedUndock: true, SuspendOnClosedUndock: true},
+		Power:    Power{OnACProfile: "performance", Restore: true, KeepAwakeWhileDocked: true},
+		Security: Security{},
 		Wake:     Wake{Enabled: false},
 		Displays: []DisplayRule{},
 	}
+}
+
+// Decode validates current configuration and upgrades supported older schemas.
+func Decode(data []byte) (Config, bool, error) {
+	var header struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return Config{}, false, err
+	}
+	if header.SchemaVersion != 1 && header.SchemaVersion != SchemaVersion {
+		return Config{}, false, fmt.Errorf("unsupported schema version %d", header.SchemaVersion)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return Config{}, false, err
+	}
+	migrated := cfg.SchemaVersion == 1
+	if migrated {
+		if cfg.Revision == 0 {
+			return Config{}, false, errors.New("revision must be greater than zero")
+		}
+		cfg.SchemaVersion = SchemaVersion
+		cfg.Revision++
+		cfg.Power.KeepAwakeWhileDocked = true
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, false, err
+	}
+	return cfg, migrated, nil
 }
 
 func (c Config) Validate() error {

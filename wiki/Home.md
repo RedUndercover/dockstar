@@ -42,5 +42,5 @@ runs as root.
 ## Current scope
 
 Version 1 supports Linux amd64 with KDE Plasma 6 Wayland. It has one display
-backend, schema version 1, an empty allowlist by default, and optional packaged
+backend, schema version 2, an empty allowlist by default, and optional packaged
 hardware wake integration.

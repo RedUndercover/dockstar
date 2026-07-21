@@ -32,6 +32,6 @@ tour of the same codebase.
 
 ## Version scope
 
-These documents describe schema version 1 and the initial Go implementation.
+These documents describe schema version 2 and the Go implementation.
 Version 1 targets Linux amd64 running KDE Plasma 6 on Wayland. X11, GNOME,
 wlroots compositors, and arm64 are outside the current compatibility promise.

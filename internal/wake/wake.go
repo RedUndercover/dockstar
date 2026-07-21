@@ -19,6 +19,7 @@ const (
 )
 
 var pciID = regexp.MustCompile(`^0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$`)
+var usbRootID = regexp.MustCompile(`^usb[0-9]+$`)
 
 type Source struct {
 	ID      string `json:"id"`
@@ -63,6 +64,17 @@ func GetStatus(root string) (Status, error) {
 	return Status{Installed: true, Enabled: cfg.Enabled, Sources: sources}, nil
 }
 
+func PolicyEnabled(root string) (bool, error) {
+	if root == "" {
+		root = "/"
+	}
+	var cfg policy
+	if err := readJSON(rooted(root, PolicyPath), &cfg); err != nil {
+		return false, err
+	}
+	return cfg.Enabled, nil
+}
+
 func Discover(root string) ([]Source, error) {
 	paths, err := filepath.Glob(filepath.Join(root, "sys/bus/pci/devices", "*"))
 	if err != nil {
@@ -84,6 +96,28 @@ func Discover(root string) ([]Source, error) {
 		sources = append(sources, Source{
 			ID: "pci:" + id, Class: class, Vendor: read(path + "/vendor"), Device: read(path + "/device"),
 			State: strings.TrimSpace(string(stateBytes)), Managed: true,
+		})
+	}
+	usbPaths, err := filepath.Glob(filepath.Join(root, "sys/bus/usb/devices", "usb*"))
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range usbPaths {
+		id := filepath.Base(path)
+		if !usbRootID.MatchString(id) {
+			continue
+		}
+		stateBytes, err := os.ReadFile(filepath.Join(path, "power/wakeup"))
+		if err != nil {
+			continue
+		}
+		sources = append(sources, Source{
+			ID:      "usb:" + id,
+			Class:   "usb-root-hub",
+			Vendor:  read(filepath.Join(path, "idVendor")),
+			Device:  read(filepath.Join(path, "idProduct")),
+			State:   strings.TrimSpace(string(stateBytes)),
+			Managed: true,
 		})
 	}
 	sort.Slice(sources, func(i, j int) bool { return sources[i].ID < sources[j].ID })
@@ -161,12 +195,19 @@ func Helper(action, root string) error {
 }
 
 func recordBaseline(path string, sources []Source) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	}
 	baseline := make(map[string]string, len(sources))
+	if err := readJSON(path, &baseline); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	changed := false
 	for _, source := range sources {
-		baseline[source.ID] = source.State
+		if _, exists := baseline[source.ID]; !exists {
+			baseline[source.ID] = source.State
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
 	}
 	return writeJSON(path, baseline, 0o600)
 }
@@ -185,13 +226,18 @@ func apply(root string, cfg policy) error {
 }
 
 func set(root, id, state string) error {
-	if !strings.HasPrefix(id, "pci:") || !pciID.MatchString(strings.TrimPrefix(id, "pci:")) {
-		return fmt.Errorf("refusing invalid wake source %q", id)
-	}
 	if state != "enabled" && state != "disabled" {
 		return fmt.Errorf("refusing invalid wake state %q", state)
 	}
-	path := filepath.Join(root, "sys/bus/pci/devices", strings.TrimPrefix(id, "pci:"), "power/wakeup")
+	var path string
+	switch {
+	case strings.HasPrefix(id, "pci:") && pciID.MatchString(strings.TrimPrefix(id, "pci:")):
+		path = filepath.Join(root, "sys/bus/pci/devices", strings.TrimPrefix(id, "pci:"), "power/wakeup")
+	case strings.HasPrefix(id, "usb:") && usbRootID.MatchString(strings.TrimPrefix(id, "usb:")):
+		path = filepath.Join(root, "sys/bus/usb/devices", strings.TrimPrefix(id, "usb:"), "power/wakeup")
+	default:
+		return fmt.Errorf("refusing invalid wake source %q", id)
+	}
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("unavailable wake source %s: %w", id, err)
 	}
