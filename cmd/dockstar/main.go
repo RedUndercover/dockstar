@@ -17,6 +17,7 @@ import (
 	"github.com/redundercover/dockstar/internal/daemon"
 	"github.com/redundercover/dockstar/internal/display"
 	"github.com/redundercover/dockstar/internal/ipc"
+	"github.com/redundercover/dockstar/internal/startup"
 	"github.com/redundercover/dockstar/internal/version"
 	"github.com/redundercover/dockstar/internal/wake"
 )
@@ -39,6 +40,10 @@ func run(args []string) error {
 	case "daemon":
 		cancel()
 		return runDaemon()
+	case "startup-guard":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return startup.Run(ctx, slog.Default())
 	case "version", "--version":
 		fmt.Printf("dockstar %s (%s, %s)\n", version.Version, version.Commit, version.Date)
 		return nil
@@ -49,6 +54,8 @@ func run(args []string) error {
 		return printCompletion(args[1])
 	case "config":
 		return configCommand(args[1:])
+	case "startup":
+		return startupCommand(ctx, args[1:])
 	case "wake":
 		return wakeCommand(ctx, args[1:])
 	}
@@ -75,6 +82,11 @@ func run(args []string) error {
 		return printValue(state.Outputs)
 	case "apply":
 		return client.Call(ctx, "Apply")
+	case "suspend":
+		if len(args) != 1 {
+			return errors.New("usage: dockstar suspend")
+		}
+		return client.Call(ctx, "SuspendNow")
 	case "diagnose":
 		value, err := client.JSONCall(ctx, "Diagnose")
 		return printJSON(value, err)
@@ -185,6 +197,41 @@ func wakeCommand(ctx context.Context, args []string) error {
 	}
 }
 
+func startupCommand(ctx context.Context, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: dockstar startup status|enable|sync|disable")
+	}
+	switch args[0] {
+	case "status":
+		status, err := startup.GetStatus()
+		if err != nil {
+			return err
+		}
+		return printValue(status)
+	case "enable", "sync":
+		store, err := config.Open("")
+		if err != nil {
+			return err
+		}
+		if args[0] == "sync" {
+			if err := startup.Sync(ctx, store.Get()); err != nil {
+				return err
+			}
+			fmt.Println("Pre-login policy synchronized with saved session approvals and keep-awake settings.")
+			return nil
+		}
+		if err := startup.Setup(ctx, store.Get(), true); err != nil {
+			return err
+		}
+		fmt.Println("Pre-login protection enabled. Use 'dockstar startup sync' or Settings to synchronize future approval changes.")
+		return nil
+	case "disable":
+		return startup.Setup(ctx, config.Config{}, false)
+	default:
+		return fmt.Errorf("unknown startup command %q", args[0])
+	}
+}
+
 func printJSON(value string, err error) error {
 	if err != nil {
 		return err
@@ -206,11 +253,11 @@ func printCompletion(shell string) error {
 	name := filepath.Base(os.Args[0])
 	switch shell {
 	case "bash":
-		fmt.Printf("complete -W 'status devices allow deny trust mode apply diagnose wake config completion version' %s\n", name)
+		fmt.Printf("complete -W 'status devices allow deny trust mode apply suspend diagnose wake startup config completion version' %s\n", name)
 	case "zsh":
-		fmt.Printf("#compdef %s\n_arguments '1:command:(status devices allow deny trust mode apply diagnose wake config completion version)'\n", name)
+		fmt.Printf("#compdef %s\n_arguments '1:command:(status devices allow deny trust mode apply suspend diagnose wake startup config completion version)'\n", name)
 	case "fish":
-		fmt.Printf("complete -c %s -f -a 'status devices allow deny trust mode apply diagnose wake config completion version'\n", name)
+		fmt.Printf("complete -c %s -f -a 'status devices allow deny trust mode apply suspend diagnose wake startup config completion version'\n", name)
 	default:
 		return fmt.Errorf("unsupported shell %q", shell)
 	}
@@ -237,8 +284,10 @@ Usage:
   dockstar trust all|allowlist|off
   dockstar mode extend|mirror|external-only|internal-only
   dockstar apply
+  dockstar suspend
   dockstar diagnose
   dockstar wake status|enable|disable|restore
+  dockstar startup status|enable|sync|disable
   dockstar config show|validate [PATH]
   dockstar completion bash|zsh|fish
   dockstar version

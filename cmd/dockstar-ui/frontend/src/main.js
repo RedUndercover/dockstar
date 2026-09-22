@@ -74,12 +74,13 @@ async function callBackend(method, ...args) {
 }
 
 function mockCall(method, args) {
-  if (method === 'GetState') return state || demoState();
+  if (method === 'GetState') return structuredClone(state || demoState());
   if (method === 'GetDiagnostics') return JSON.stringify(demoDiagnostics(), null, 2);
   if (method === 'SaveConfig') {
     state.config = structuredClone(args[0]);
     state.revision += 1;
     state.config.revision = state.revision;
+    refreshMockBootDiff();
     return structuredClone(state);
   }
   if (method === 'SetLayout') {
@@ -91,8 +92,32 @@ function mockCall(method, args) {
     return structuredClone(state);
   }
   if (method === 'ApproveDisplay') {
-    const output = state.status.outputs.find((item) => item.deviceId === args[0]);
-    if (output) output.approved = args[1];
+    const id = args[0];
+    const approved = args[1];
+    const output = state.status.outputs.find((item) => item.deviceId === id);
+    if (output) output.approved = approved;
+    let rule = state.config.displays.find((item) => item.id === id);
+    if (!rule) {
+      rule = { id, label: output?.label || id, allowed: approved, primaryRank: 0, scale: 1, mode: 'preferred', position: 'right' };
+      state.config.displays.push(rule);
+    }
+    rule.allowed = approved;
+    state.revision += 1;
+    state.config.revision = state.revision;
+    refreshMockBootDiff();
+    return structuredClone(state);
+  }
+  if (method === 'BootAction') {
+    const action = args[0];
+    const desired = mockApprovedEDIDs();
+    const enabled = state.config.detection !== 'off' && state.config.power.keepAwakeWhileDocked && desired.length > 0;
+    if (action === 'enable' && !enabled) throw new Error('Pre-login protection requires at least one explicitly approved EDID display.');
+    state.boot.installed = true;
+    state.boot.enabled = action === 'disable' ? false : enabled;
+    state.boot.detection = state.boot.enabled ? 'allowlist' : 'off';
+    state.boot.keepAwakeWhileDocked = state.boot.enabled;
+    state.boot.allowedEdids = state.boot.enabled ? desired : [];
+    refreshMockBootDiff();
     return structuredClone(state);
   }
   if (method === 'WakeAction') {
@@ -109,15 +134,19 @@ function mockCall(method, args) {
     state.startup.trayEnabled = args[0];
     return structuredClone(state);
   }
+  if (method === 'SuspendNow') return true;
   return structuredClone(state);
 }
 
 function resetDraft() {
   draft = structuredClone(state.config);
   dirty = false;
-  const connected = connectedOutputs();
-  if (!connected.some((output) => output.deviceId === selectedDeviceID)) {
-    selectedDeviceID = connected.find((output) => !output.panel)?.deviceId || connected[0]?.deviceId || '';
+  const devices = approvalDevices();
+  if (!devices.some((device) => device.deviceId === selectedDeviceID)) {
+    selectedDeviceID = devices.find((device) => !device.panel && device.connected)?.deviceId
+      || devices.find((device) => !device.panel)?.deviceId
+      || devices[0]?.deviceId
+      || '';
   }
 }
 
@@ -239,9 +268,8 @@ function renderOverview() {
 }
 
 function renderDisplays() {
-  const outputs = connectedOutputs();
-  const selected = outputs.find((output) => output.deviceId === selectedDeviceID) || outputs[0];
-  const rule = selected ? displayRule(selected) : null;
+  const devices = approvalDevices();
+  const selected = devices.find((device) => device.deviceId === selectedDeviceID) || devices[0];
   return `
     <div class="page-heading">
       <div><span class="eyebrow">Hardware</span><h1>Displays</h1></div>
@@ -251,59 +279,129 @@ function renderDisplays() {
       <div class="section-heading"><h2>Display arrangement</h2></div>
       ${renderTopology(selected?.deviceId)}
     </section>
+    ${renderBootApprovalPanel(devices)}
     <div class="display-workspace">
       <section class="surface device-list-surface">
-        <div class="section-heading"><h2>Connected displays</h2><span class="count-badge">${outputs.length}</span></div>
+        <div class="section-heading"><div><span class="eyebrow">Session and pre-login</span><h2>Known displays</h2></div><span class="count-badge">${devices.length}</span></div>
         <div class="device-list">
-          ${outputs.length ? outputs.map(renderDeviceRow).join('') : renderEmpty('monitor-off', 'No displays detected')}
+          ${devices.length ? devices.map(renderDeviceRow).join('') : renderEmpty('monitor-off', 'No saved or detected displays')}
         </div>
       </section>
       <section class="surface display-editor">
-        ${selected && rule ? renderDisplayEditor(selected, rule) : renderEmpty('mouse-pointer-2', 'Select a display')}
+        ${selected ? renderDisplayEditor(selected) : renderEmpty('mouse-pointer-2', 'Select a display')}
       </section>
     </div>
   `;
 }
 
-function renderDeviceRow(output) {
-  const mode = currentMode(output);
-  const approved = output.panel || output.approved;
+function renderBootApprovalPanel(devices) {
+  const boot = state.boot || { allowedEdids: [], pendingAdditions: [], pendingRemovals: [], inSync: true };
+  const support = state.bootSupport || { manageable: false, missing: [] };
+  const divergence = Boolean(boot.policyMismatch || boot.pendingAdditions?.length || boot.pendingRemovals?.length);
+  const label = state.bootError
+    ? 'Unavailable'
+    : !support.manageable
+      ? 'Setup required'
+      : divergence
+        ? 'Changes pending'
+        : boot.enabled
+          ? 'Enabled'
+          : boot.installed
+            ? 'Disabled'
+            : 'Not configured';
+  const approvedCount = devices.filter((device) => device.sessionApproved && device.bootEligible).length;
+  const enableReady = draft.detection !== 'off'
+    && draft.power.keepAwakeWhileDocked
+    && draft.displays.some((rule) => rule.allowed && isEDIDIdentity(rule.id));
+  const pending = [
+    ...(boot.pendingAdditions || []).map((id) => `add ${deviceName(id, devices)}`),
+    ...(boot.pendingRemovals || []).map((id) => `remove ${deviceName(id, devices)}`),
+  ];
+  const mismatch = boot.policyMismatch
+    ? approvedCount
+      ? 'The pre-login policy does not match the saved session policy.'
+      : 'The saved policy no longer permits pre-login protection; sync will disable it.'
+    : '';
   return `
-    <button class="device-row ${selectedDeviceID === output.deviceId ? 'selected' : ''}" data-device="${escapeAttr(output.deviceId)}">
-      <span class="device-number">${output.panel ? '<i data-lucide="laptop"></i>' : '<i data-lucide="monitor"></i>'}</span>
-      <span class="device-copy"><strong>${escapeHTML(output.label || output.connector)}</strong><small>${escapeHTML(output.connector)} · ${formatMode(mode)}</small></span>
-      <span class="approval-state ${approved ? 'approved' : ''}"><i data-lucide="${approved ? 'shield-check' : 'shield-alert'}"></i>${approved ? 'Approved' : 'Blocked'}</span>
+    <section class="surface boot-approval-surface">
+      <div class="section-heading">
+        <div><span class="eyebrow">Before sign-in</span><h2><i data-lucide="shield"></i>Pre-login sleep protection</h2></div>
+        <span class="status-badge ${boot.enabled && !divergence && !state.bootError ? 'good' : ''}">${label}</span>
+      </div>
+      <div class="boot-approval-copy">
+        <div>
+          <strong>Protect only explicitly approved EDID displays before login</strong>
+          <p>${enableReady ? 'This is separate from login-session startup and hardware wake. Administrator authentication is required to change the root-owned policy.' : 'Enable requires detection, session sleep protection, and at least one explicitly approved EDID display. This remains separate from hardware wake.'}</p>
+        </div>
+        <div class="button-group">
+          <button class="secondary-button" data-boot="enable" ${busy || !support.manageable || boot.enabled || !enableReady ? 'disabled' : ''}><i data-lucide="shield-check"></i><span>Enable</span></button>
+          <button class="primary-button" data-boot="sync" ${busy || !support.manageable || (!divergence && !dirty && !state.bootError) ? 'disabled' : ''}><i data-lucide="refresh-cw"></i><span>Sync saved approvals</span></button>
+          <button class="quiet-button" data-boot="disable" ${busy || !support.manageable || (!state.bootError && (!boot.installed || !boot.enabled)) ? 'disabled' : ''}><i data-lucide="shield-off"></i><span>Disable</span></button>
+        </div>
+      </div>
+      ${state.bootError ? `<div class="error-message"><i data-lucide="circle-alert"></i><span>Cannot read the installed pre-login policy: ${escapeHTML(state.bootError)}</span></div>` : ''}
+      ${!support.manageable ? `<div class="error-message"><i data-lucide="package-x"></i><span>Packaged pre-login support is incomplete. Install the Dockstar system package. Missing: ${escapeHTML((support.missing || []).join(', ') || 'startup helper, policy, or unit')}.</span></div>` : ''}
+      ${divergence ? `<div class="banner warning boot-divergence"><i data-lucide="triangle-alert"></i><span><strong>Pre-login policy is not synchronized.</strong>${mismatch ? ` ${escapeHTML(mismatch)}` : ''}${pending.length ? ` Pending: ${escapeHTML(pending.join('; '))}.` : ''} Session approval changes do not elevate automatically.</span></div>` : ''}
+    </section>
+  `;
+}
+
+function renderDeviceRow(device) {
+  const mode = device.output ? currentMode(device.output) : null;
+  const detail = device.connected
+    ? `${device.connector || 'Connected'} · ${formatMode(mode)}`
+    : device.bootEnrolled && !device.savedRule
+      ? 'Disconnected · retained only by pre-login policy'
+      : 'Disconnected · saved session device';
+  const sessionLabel = device.panel ? 'Built-in' : device.sessionApproved ? 'Session approved' : device.savedRule ? 'Session revoked' : 'Not session-approved';
+  const bootLabel = device.panel || !device.bootEligible ? 'Pre-login ineligible' : device.bootEnrolled ? 'Pre-login enrolled' : 'Not pre-login enrolled';
+  return `
+    <button class="device-row ${selectedDeviceID === device.deviceId ? 'selected' : ''}" data-device="${escapeAttr(device.deviceId)}">
+      <span class="device-number">${device.panel ? '<i data-lucide="laptop"></i>' : '<i data-lucide="monitor"></i>'}</span>
+      <span class="device-copy"><strong>${escapeHTML(device.label)}</strong><small>${escapeHTML(detail)}</small></span>
+      <span class="approval-stack">
+        <span class="approval-state ${device.sessionApproved ? 'approved' : ''}"><i data-lucide="${device.sessionApproved ? 'shield-check' : 'shield-alert'}"></i>${sessionLabel}</span>
+        <span class="approval-state prelogin ${device.bootEnrolled ? 'approved' : ''}"><i data-lucide="${device.bootEnrolled ? 'lock-keyhole' : 'lock-open'}"></i>${bootLabel}</span>
+      </span>
       <i data-lucide="chevron-right" class="row-chevron"></i>
     </button>
   `;
 }
 
-function renderDisplayEditor(output, rule) {
-  const modes = uniqueModes(output.modes || []);
+function renderDisplayEditor(device) {
+  const output = device.output;
+  const rule = draft.displays.find((item) => item.id === device.deviceId) || (output ? displayRule(output) : {
+    id: device.deviceId, label: device.label, allowed: false, primaryRank: 0, scale: 1, mode: 'preferred', position: 'right',
+  });
+  const modes = uniqueModes(output?.modes || []);
   return `
-    <div class="section-heading"><div><span class="eyebrow">Selected display</span><h2>${escapeHTML(output.label || output.connector)}</h2></div></div>
+    <div class="section-heading"><div><span class="eyebrow">${device.connected ? 'Detected display' : 'Saved display'}</span><h2>${escapeHTML(device.label)}</h2></div><span class="status-badge ${device.connected ? 'good' : ''}">${device.connected ? 'Connected' : 'Disconnected'}</span></div>
     <div class="form-rows">
-      <label class="form-row switch-row ${output.panel ? 'disabled' : ''}">
-        <span><strong>Approved device</strong><small>${output.panel ? 'Built-in displays are always trusted' : 'Allow this display to trigger docking'}</small></span>
-        <input type="checkbox" data-approve="${escapeAttr(output.deviceId)}" ${output.panel || output.approved ? 'checked' : ''} ${output.panel ? 'disabled' : ''} />
+      <label class="form-row switch-row ${device.panel ? 'disabled' : ''}">
+        <span><strong>Session approval</strong><small>${device.panel ? 'Built-in displays are always available' : 'Saved approval allows this display to trigger docking after sign-in; it does not update pre-login protection'}</small></span>
+        <input type="checkbox" data-approve="${escapeAttr(device.deviceId)}" ${device.panel || device.sessionApproved ? 'checked' : ''} ${device.panel ? 'disabled' : ''} />
         <span class="switch" aria-hidden="true"></span>
       </label>
-      <label class="form-row"><span><strong>Resolution</strong><small>Mode applied when this display is active</small></span>
-        <select data-rule="mode">
-          <option value="preferred" ${rule.mode === 'preferred' ? 'selected' : ''}>Preferred</option>
-          ${modes.map((mode) => `<option value="${escapeAttr(mode.id)}" ${rule.mode === mode.id ? 'selected' : ''}>${formatMode(mode)}</option>`).join('')}
-        </select>
-      </label>
-      <label class="form-row"><span><strong>Scale</strong><small>Interface scale on this display</small></span>
-        <select data-rule="scale">${scaleOptions(rule.scale).map((value) => `<option value="${value}" ${Number(rule.scale) === value ? 'selected' : ''}>${Math.round(value * 100)}%</option>`).join('')}</select>
-      </label>
-      <label class="form-row"><span><strong>Position</strong><small>Placement relative to the primary display</small></span>
-        <select data-rule="position">${optionList([['left', 'Left'], ['right', 'Right'], ['above', 'Above'], ['below', 'Below']], rule.position)}</select>
-      </label>
-      <label class="form-row"><span><strong>Primary priority</strong><small>Higher values win when multiple externals are connected</small></span>
-        <input type="number" min="0" max="100" step="1" value="${Number(rule.primaryRank) || 0}" data-rule="primaryRank" />
-      </label>
-      <div class="form-row fingerprint"><span><strong>Device fingerprint</strong><small>Stable EDID identity</small></span><code>${escapeHTML(output.deviceId)}</code></div>
+      <div class="form-row approval-detail"><span><strong>Pre-login enrollment</strong><small>${device.bootEligible ? 'Root-owned policy used before the graphical session starts' : 'Only stable EDID identities can be enrolled before login'}</small></span><span class="approval-state ${device.bootEnrolled ? 'approved' : ''}"><i data-lucide="${device.bootEnrolled ? 'lock-keyhole' : 'lock-open'}"></i>${device.bootEnrolled ? 'Enrolled' : 'Not enrolled'}</span></div>
+      ${device.bootEnrolled && !device.sessionApproved ? `<div class="boot-revoke"><i data-lucide="shield-alert"></i><span><strong>This device remains in pre-login protection</strong><small>Revoke it from the saved session policy and authenticate to remove it now.</small></span><button class="secondary-button" data-boot-revoke="${escapeAttr(device.deviceId)}" ${busy ? 'disabled' : ''}><i data-lucide="user-x"></i><span>Revoke and sync</span></button></div>` : ''}
+      ${output ? `
+        <label class="form-row"><span><strong>Resolution</strong><small>Mode applied when this display is active</small></span>
+          <select data-rule="mode">
+            <option value="preferred" ${rule.mode === 'preferred' ? 'selected' : ''}>Preferred</option>
+            ${modes.map((mode) => `<option value="${escapeAttr(mode.id)}" ${rule.mode === mode.id ? 'selected' : ''}>${formatMode(mode)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="form-row"><span><strong>Scale</strong><small>Interface scale on this display</small></span>
+          <select data-rule="scale">${scaleOptions(rule.scale).map((value) => `<option value="${value}" ${Number(rule.scale) === value ? 'selected' : ''}>${Math.round(value * 100)}%</option>`).join('')}</select>
+        </label>
+        <label class="form-row"><span><strong>Position</strong><small>Placement relative to the primary display</small></span>
+          <select data-rule="position">${optionList([['left', 'Left'], ['right', 'Right'], ['above', 'Above'], ['below', 'Below']], rule.position)}</select>
+        </label>
+        <label class="form-row"><span><strong>Primary priority</strong><small>Higher values win when multiple externals are connected</small></span>
+          <input type="number" min="0" max="100" step="1" value="${Number(rule.primaryRank) || 0}" data-rule="primaryRank" />
+        </label>
+      ` : '<div class="disconnected-note"><i data-lucide="monitor-off"></i><span>Layout controls become available when this display reconnects.</span></div>'}
+      <div class="form-row fingerprint"><span><strong>Device fingerprint</strong><small>${device.bootEligible ? 'Stable EDID identity' : 'Session-only identity'}</small></span><code>${escapeHTML(device.deviceId)}</code></div>
     </div>
   `;
 }
@@ -318,10 +416,10 @@ function renderAutomation() {
     <div class="automation-grid">
       <div class="automation-main">
         <section class="surface form-section">
-          <div class="section-heading"><h2><i data-lucide="rocket"></i>Application</h2></div>
+          <div class="section-heading"><div><span class="eyebrow">After sign-in</span><h2><i data-lucide="rocket"></i>Login-session startup</h2></div></div>
           <div class="form-rows">
             <label class="form-row switch-row ${state.startup?.error ? 'disabled' : ''}">
-              <span><strong>Start Dockstar automatically</strong><small>Launch the controller and tray when you sign in</small></span>
+              <span><strong>Start Dockstar when I sign in</strong><small>Launch the user-session controller and tray. This does not configure pre-login sleep protection or hardware wake.</small></span>
               <input type="checkbox" data-startup-toggle ${state.startup?.enabled ? 'checked' : ''} ${state.startup?.error || busy ? 'disabled' : ''} />
               <span class="switch" aria-hidden="true"></span>
             </label>
@@ -377,7 +475,7 @@ function renderWake() {
   const heading = !support.manageable ? 'System support is required' : outOfSync ? 'Wake policy needs reapplying' : enabled ? 'Dock wake is enabled' : 'Dock wake is disabled';
   const detail = !support.manageable
     ? 'Install Dockstar from a system package to add the privileged wake helper.'
-    : `${wake.sources.length} eligible controller${wake.sources.length === 1 ? '' : 's'} detected${support.persistent ? ' · reapplied after resume' : ''}`;
+    : `${wake.sources.length} eligible controller${wake.sources.length === 1 ? '' : 's'} detected${support.persistent ? ' · reapplied after resume' : ''}. Hardware wake is separate from login-session startup and pre-login sleep protection.`;
   return `
     <div class="page-heading">
       <div><span class="eyebrow">Resume hardware</span><h1>Wake & power</h1></div>
@@ -402,6 +500,11 @@ function renderWake() {
           <i data-lucide="shield-check"></i>
           <span><strong>Automatic sleep protection</strong><small>${escapeHTML(protection.detail)}</small></span>
           <span class="status-badge ${protection.good ? 'good' : ''}">${escapeHTML(protection.label)}</span>
+        </div>
+        <div class="wake-setup suspend-action">
+          <i data-lucide="moon-star"></i>
+          <span><strong>Intentional suspend</strong><small>Release Dockstar protection for one suspend cycle</small></span>
+          <button class="secondary-button" data-action="suspend-now" ${busy ? 'disabled' : ''}><i data-lucide="moon"></i><span>Suspend now</span></button>
         </div>
         ${!support.manageable ? `<div class="wake-setup"><i data-lucide="shield-alert"></i><span><strong>Packaged support is not installed</strong><small>Missing: ${escapeHTML((support.missing || []).join(', ') || 'system wake components')}</small></span><button class="secondary-button" data-action="refresh" ${busy ? 'disabled' : ''}><i data-lucide="refresh-cw"></i><span>Recheck</span></button></div>` : ''}
       </section>
@@ -514,6 +617,8 @@ function bindEvents() {
     render();
   }));
   document.querySelectorAll('[data-approve]').forEach((control) => control.addEventListener('change', () => approveDisplay(control.dataset.approve, control.checked)));
+  document.querySelectorAll('[data-boot]').forEach((button) => button.addEventListener('click', () => bootAction(button.dataset.boot)));
+  document.querySelectorAll('[data-boot-revoke]').forEach((button) => button.addEventListener('click', () => revokeBootDevice(button.dataset.bootRevoke)));
   document.querySelectorAll('[data-wake]').forEach((button) => button.addEventListener('click', () => wakeAction(button.dataset.wake)));
   document.querySelectorAll('[data-wake-toggle]').forEach((toggle) => toggle.addEventListener('change', () => wakeAction(toggle.checked ? 'enable' : 'disable')));
   document.querySelectorAll('[data-startup-toggle]').forEach((toggle) => toggle.addEventListener('change', () => setStartupEnabled(toggle.checked)));
@@ -527,6 +632,7 @@ async function handleAction(action) {
     showToast('Settings saved');
   });
   if (action === 'apply-layout') return applyLayout();
+  if (action === 'suspend-now') return suspendNow();
   if (action === 'load-diagnostics') return loadDiagnostics();
   if (action === 'copy-diagnostics') return copyDiagnostics();
 }
@@ -570,7 +676,8 @@ async function approveDisplay(id, approved) {
     if (dirty) await saveConfig(false);
     state = await callBackend('ApproveDisplay', id, approved);
     resetDraft();
-    showToast(approved ? 'Display approved' : 'Display blocked');
+    const unsynced = !state.boot?.inSync;
+    showToast(`${approved ? 'Session approval saved' : 'Session approval revoked'}${unsynced ? '; pre-login policy still needs explicit sync' : ''}`);
   });
 }
 
@@ -588,6 +695,69 @@ async function setStartupEnabled(enabled) {
     state = await callBackend('SetStartupEnabled', enabled);
     resetDraft();
     showToast(enabled ? 'Dockstar will start when you sign in' : 'Dockstar startup disabled');
+  });
+}
+
+async function bootAction(action) {
+  await runBusy(async () => {
+    if ((action === 'enable' || action === 'sync') && dirty) await saveConfig(false);
+    try {
+      state = await callBackend('BootAction', action);
+      resetDraft();
+    } catch (error) {
+      try {
+        state = await callBackend('GetState');
+        resetDraft();
+      } catch (_) {
+        // Keep the last known state when the daemon is also unavailable.
+      }
+      throw new Error(`Pre-login protection was not confirmed: ${errorMessage(error)} Current installed state was refreshed when possible.`);
+    }
+    if (state.bootError) {
+      throw new Error(`The privileged helper returned, but the installed pre-login policy cannot be verified: ${state.bootError}`);
+    }
+    if (action === 'disable' && state.boot?.enabled) {
+      throw new Error('The privileged helper returned, but pre-login protection still reports enabled.');
+    }
+    if ((action === 'enable' || action === 'sync') && !state.boot?.inSync) {
+      throw new Error('The privileged helper returned, but the installed pre-login policy still differs from saved approvals.');
+    }
+    showToast(action === 'disable' || !state.boot?.enabled ? 'Pre-login sleep protection disabled' : action === 'enable' ? 'Pre-login sleep protection enabled' : 'Pre-login approvals synchronized');
+  });
+}
+
+async function revokeBootDevice(id) {
+  await runBusy(async () => {
+    if (dirty) await saveConfig(false);
+    state = await callBackend('ApproveDisplay', id, false);
+    resetDraft();
+    try {
+      state = await callBackend('BootAction', 'sync');
+      resetDraft();
+    } catch (error) {
+      try {
+        state = await callBackend('GetState');
+        resetDraft();
+      } catch (_) {
+        // The saved revocation remains visible even if status refresh fails.
+      }
+      throw new Error(`Session approval was revoked, but the pre-login removal was not confirmed: ${errorMessage(error)}`);
+    }
+    if (state.bootError) {
+      throw new Error(`Session approval was revoked, but the installed pre-login policy cannot be verified: ${state.bootError}`);
+    }
+    if (!state.boot?.inSync) {
+      throw new Error('Session approval was revoked, but the installed pre-login policy still reports pending changes.');
+    }
+    showToast(state.boot?.enabled ? 'Display revoked from session and pre-login protection' : 'Display revoked; pre-login protection is now disabled');
+  });
+}
+
+async function suspendNow() {
+  await runBusy(async () => {
+    if (dirty) await saveConfig(false);
+    const confirmed = await callBackend('SuspendNow');
+    if (confirmed) showToast('Suspend requested');
   });
 }
 
@@ -644,11 +814,88 @@ function connectedOutputs() {
   return (state.status.outputs || []).filter((output) => output.connected);
 }
 
+function approvalDevices() {
+  const devices = new Map();
+  const upsert = (id, values) => {
+    if (!id) return;
+    devices.set(id, { ...(devices.get(id) || { deviceId: id }), ...values });
+  };
+  for (const output of state.status.outputs || []) {
+    upsert(output.deviceId, {
+      output,
+      label: output.label || output.connector || output.deviceId,
+      connector: output.connector,
+      panel: Boolean(output.panel),
+      connected: Boolean(output.connected),
+    });
+  }
+  for (const rule of state.config.displays || []) {
+    upsert(rule.id, {
+      savedRule: rule,
+      label: rule.label || devices.get(rule.id)?.label || rule.id,
+    });
+  }
+  for (const id of state.boot?.allowedEdids || []) {
+    upsert(id, { bootEnrolled: true, label: devices.get(id)?.label || shortDeviceID(id) });
+  }
+  const enrolled = new Set(state.boot?.allowedEdids || []);
+  return [...devices.values()].map((device) => ({
+    ...device,
+    label: device.label || shortDeviceID(device.deviceId),
+    panel: Boolean(device.panel),
+    connected: Boolean(device.connected),
+    sessionApproved: Boolean(device.panel || device.savedRule?.allowed),
+    bootEligible: isEDIDIdentity(device.deviceId),
+    bootEnrolled: enrolled.has(device.deviceId),
+  })).sort((left, right) =>
+    Number(right.panel) - Number(left.panel)
+    || Number(right.connected) - Number(left.connected)
+    || left.label.localeCompare(right.label));
+}
+
+function isEDIDIdentity(id) {
+  return /^edid:[0-9a-f]{64}$/.test(String(id));
+}
+
+function shortDeviceID(id) {
+  return isEDIDIdentity(id) ? `EDID ${id.slice(5, 13)}…` : id;
+}
+
+function deviceName(id, devices = approvalDevices()) {
+  return devices.find((device) => device.deviceId === id)?.label || shortDeviceID(id);
+}
+
+function errorMessage(error) {
+  return error?.message || String(error);
+}
+
+function mockApprovedEDIDs() {
+  return [...new Set((state.config.displays || [])
+    .filter((rule) => rule.allowed && isEDIDIdentity(rule.id))
+    .map((rule) => rule.id))]
+    .sort();
+}
+
+function refreshMockBootDiff() {
+  const desired = mockApprovedEDIDs();
+  const installed = [...(state.boot.allowedEdids || [])].sort();
+  const desiredEnabled = state.config.detection !== 'off' && state.config.power.keepAwakeWhileDocked && desired.length > 0;
+  const desiredSet = new Set(desired);
+  const installedSet = new Set(installed);
+  state.boot.pendingAdditions = desired.filter((id) => !installedSet.has(id));
+  state.boot.pendingRemovals = installed.filter((id) => !desiredSet.has(id));
+  state.boot.policyMismatch = state.boot.enabled !== desiredEnabled
+    || (state.boot.installed && (state.boot.detection !== (desiredEnabled ? 'allowlist' : 'off') || state.boot.keepAwakeWhileDocked !== desiredEnabled));
+  state.boot.inSync = !state.boot.policyMismatch
+    && state.boot.pendingAdditions.length === 0
+    && state.boot.pendingRemovals.length === 0;
+}
+
 function displayRule(output) {
   return draft.displays.find((rule) => rule.id === output.deviceId) || {
     id: output.deviceId,
     label: output.label,
-    allowed: output.panel || output.approved,
+    allowed: Boolean(output.panel),
     primaryRank: Number(output.priority) || 0,
     scale: Number(output.scale) || 1,
     mode: output.currentModeId || 'preferred',
@@ -745,17 +992,14 @@ function sleepProtectionSummary() {
   if (!protection.enabled) {
     return { label: 'Disabled', detail: 'Dockstar will follow the desktop sleep policy', good: false, warning: '' };
   }
+  if (protection.phase === 'manual-suspend') {
+    return { label: 'Suspending', detail: 'Protection is released for this suspend only', good: true, warning: '' };
+  }
   if (protection.lastError && !protection.active) {
     return { label: 'Unavailable', detail: protection.lastError, good: false, warning: protection.lastError };
   }
   if (!protection.active) {
     return { label: 'Ready', detail: 'Activates automatically for an approved dock', good: true, warning: '' };
-  }
-  if (protection.backend === 'logind') {
-    const warning = protection.degraded
-      ? 'Compatibility protection is active because Plasma sleep protection is unavailable. Manual Sleep may be blocked while docked.'
-      : '';
-    return { label: protection.degraded ? 'Compatibility mode' : 'Starting', detail: 'Automatic sleep is currently blocked through logind', good: true, warning };
   }
   if (protection.phase === 'resume-grace') {
     return { label: 'Resume guard', detail: 'Waiting briefly for the approved dock to appear', good: true, warning: '' };
@@ -763,7 +1007,10 @@ function sleepProtectionSummary() {
   if (protection.phase === 'undock-grace') {
     return { label: 'Disconnect guard', detail: 'Keeping the session stable while the dock disconnects', good: true, warning: '' };
   }
-  return { label: 'Active', detail: 'Plasma automatic sleep is blocked while this dock is active', good: true, warning: '' };
+  if (protection.phase === 'snapshot-grace') {
+    return { label: 'Detection guard', detail: 'Display state is temporarily unknown; sleep remains blocked while detection recovers', good: true, warning: protection.lastError || '' };
+  }
+  return { label: 'Protected', detail: 'System sleep is blocked while this dock is active', good: true, warning: '' };
 }
 
 function wakeClass(value) {
@@ -783,6 +1030,10 @@ function escapeAttr(value) {
 
 function demoState() {
   const now = new Date().toISOString();
+  const connectedID = `edid:${'a'.repeat(64)}`;
+  const disconnectedID = `edid:${'b'.repeat(64)}`;
+  const revokedID = `edid:${'c'.repeat(64)}`;
+  const removedID = `edid:${'d'.repeat(64)}`;
   return {
     revision: 8,
     config: {
@@ -791,16 +1042,26 @@ function demoState() {
       audio: { policy: 'prefer-display', restore: true }, network: { policy: 'prefer-wired' },
       power: { onAcProfile: 'performance', restore: true, keepAwakeWhileDocked: true },
       security: { lockOnClosedUndock: true, suspendOnClosedUndock: true }, wake: { enabled: true },
-      displays: [{ id: 'GSM-5B09-A1C83F', label: 'LG UltraFine', allowed: true, primaryRank: 10, scale: 1, mode: 'ext-4k', position: 'right' }],
-    },
-    status: {
-      docked: true, lidClosed: false, layout: 'extend', primary: 'GSM-5B09-A1C83F', backend: 'KScreen', updated: now,
-      sleepProtection: { enabled: true, active: true, phase: 'docked', backend: 'powerdevil', degraded: false },
-      outputs: [
-        { id: 1, deviceId: 'eDP-1-panel', connector: 'eDP-1', label: 'Laptop display', panel: true, connected: true, enabled: true, approved: true, priority: 2, scale: 1.5, width: 2560, height: 1600, currentModeId: 'panel-native', modes: [{ id: 'panel-native', width: 2560, height: 1600, refreshHz: 120 }] },
-        { id: 2, deviceId: 'GSM-5B09-A1C83F', connector: 'DisplayPort-1', label: 'LG UltraFine', panel: false, connected: true, enabled: true, approved: true, priority: 1, scale: 1, width: 3840, height: 2160, currentModeId: 'ext-4k', modes: [{ id: 'ext-4k', width: 3840, height: 2160, refreshHz: 60 }, { id: 'ext-1440', width: 2560, height: 1440, refreshHz: 60 }] },
+      displays: [
+        { id: connectedID, label: 'LG UltraFine', allowed: true, primaryRank: 10, scale: 1, mode: 'ext-4k', position: 'right' },
+        { id: disconnectedID, label: 'Conference projector', allowed: true, primaryRank: 2, scale: 1, mode: 'preferred', position: 'right' },
+        { id: revokedID, label: 'Retired desk dock', allowed: false, primaryRank: 0, scale: 1, mode: 'preferred', position: 'right' },
       ],
     },
+    status: {
+      docked: true, lidClosed: false, layout: 'extend', primary: connectedID, backend: 'KScreen', updated: now,
+      sleepProtection: { enabled: true, active: true, phase: 'snapshot-grace', backend: 'logind', mode: 'block', acquiredAt: now, degraded: true, lastError: 'KScreen is refreshing its output snapshot' },
+      outputs: [
+        { id: 1, deviceId: 'connector:internal-panel', connector: 'eDP-1', label: 'Laptop display', panel: true, connected: true, enabled: true, approved: true, priority: 2, scale: 1.5, width: 2560, height: 1600, currentModeId: 'panel-native', modes: [{ id: 'panel-native', width: 2560, height: 1600, refreshHz: 120 }] },
+        { id: 2, deviceId: connectedID, connector: 'DisplayPort-1', label: 'LG UltraFine', panel: false, connected: true, enabled: true, approved: true, priority: 1, scale: 1, width: 3840, height: 2160, currentModeId: 'ext-4k', modes: [{ id: 'ext-4k', width: 3840, height: 2160, refreshHz: 60 }, { id: 'ext-1440', width: 2560, height: 1440, refreshHz: 60 }] },
+      ],
+    },
+    boot: {
+      installed: true, enabled: true, detection: 'allowlist', keepAwakeWhileDocked: true,
+      allowedEdids: [connectedID, revokedID, removedID],
+      pendingAdditions: [disconnectedID], pendingRemovals: [revokedID, removedID], policyMismatch: false, inSync: false,
+    },
+    bootSupport: { manageable: true, missing: [] },
     wake: { installed: true, enabled: true, sources: [
       { id: 'pci:0000:00:0d.0', class: '0x0c0330', vendor: '0x8086', device: '0x9a13', state: 'enabled', managed: true },
       { id: 'pci:0000:03:00.0', class: '0x030000', vendor: '0x1002', device: '0x73df', state: 'enabled', managed: true },
@@ -813,6 +1074,6 @@ function demoState() {
 function demoDiagnostics() {
   return {
     backend: 'KScreen', configPath: '/home/user/.config/dockstar/config.json', desktop: 'KDE', waylandDisplay: 'wayland-0',
-    status: state.status, wake: state.wake,
+    status: state.status, boot: state.boot, bootSupport: state.bootSupport, wake: state.wake,
   };
 }

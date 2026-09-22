@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/redundercover/dockstar/internal/config"
+	"github.com/redundercover/dockstar/internal/startup"
 )
 
 func TestDisplayLabel(t *testing.T) {
@@ -30,6 +33,55 @@ func TestWakeActionRejectsUnknownAction(t *testing.T) {
 	t.Parallel()
 	if _, err := (&App{}).WakeAction("apply"); err == nil {
 		t.Fatal("WakeAction accepted an unsupported action")
+	}
+}
+
+func TestBootProtectionStatusReportsSavedAndInstalledDivergence(t *testing.T) {
+	t.Parallel()
+	added := "edid:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	removed := "edid:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	cfg := config.Default()
+	cfg.Displays = []config.DisplayRule{{ID: added, Allowed: true}}
+	current := startup.Status{
+		Installed: true, Enabled: true, Detection: "allowlist", KeepAwakeWhileDocked: true,
+		AllowedEDIDs: []string{removed},
+	}
+
+	got := bootProtectionStatus(cfg, current)
+	if got.PolicyMismatch {
+		t.Fatalf("PolicyMismatch = true for matching enabled policy metadata")
+	}
+	if got.InSync {
+		t.Fatal("InSync = true with approval additions and removals")
+	}
+	if len(got.PendingAdditions) != 1 || got.PendingAdditions[0] != added {
+		t.Fatalf("PendingAdditions = %v, want %q", got.PendingAdditions, added)
+	}
+	if len(got.PendingRemovals) != 1 || got.PendingRemovals[0] != removed {
+		t.Fatalf("PendingRemovals = %v, want %q", got.PendingRemovals, removed)
+	}
+}
+
+func TestBootProtectionStatusFinalRevocationRequiresDisabledPolicy(t *testing.T) {
+	t.Parallel()
+	revoked := "edid:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cfg := config.Default()
+	cfg.Displays = []config.DisplayRule{{ID: revoked, Allowed: false}}
+
+	pending := bootProtectionStatus(cfg, startup.Status{
+		Installed: true, Enabled: true, Detection: "allowlist", KeepAwakeWhileDocked: true,
+		AllowedEDIDs: []string{revoked},
+	})
+	if !pending.PolicyMismatch || pending.InSync {
+		t.Fatalf("enabled status after final revocation = %+v, want disabled-policy mismatch", pending)
+	}
+	if len(pending.PendingRemovals) != 1 || pending.PendingRemovals[0] != revoked {
+		t.Fatalf("PendingRemovals = %v, want final revoked EDID", pending.PendingRemovals)
+	}
+
+	synced := bootProtectionStatus(cfg, startup.Status{Installed: true, Detection: "off", AllowedEDIDs: []string{}})
+	if !synced.InSync || synced.PolicyMismatch || len(synced.PendingRemovals) != 0 {
+		t.Fatalf("disabled status after final revocation = %+v, want synchronized disabled policy", synced)
 	}
 }
 

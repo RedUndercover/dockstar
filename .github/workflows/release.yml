@@ -20,8 +20,13 @@ jobs:
         with:
           go-version: '1.26.x'
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cmd/dockstar-ui/frontend/package-lock.json
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgl1-mesa-dev xorg-dev libxkbcommon-dev
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - uses: sigstore/cosign-installer@v3
       - uses: anchore/sbom-action/download-syft@v0
       - uses: goreleaser/goreleaser-action@v6

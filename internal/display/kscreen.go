@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -26,7 +25,10 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("%s: %w: %s", filepath.Base(name), err, strings.TrimSpace(string(out)))
@@ -96,15 +98,25 @@ func (k *KScreen) Snapshot(ctx context.Context, cfg config.Config) (Snapshot, er
 		return Snapshot{}, fmt.Errorf("decode kscreen output: %w", err)
 	}
 	result := Snapshot{At: time.Now().UTC(), Outputs: make([]Output, 0, len(doc.Outputs))}
+	physical, physicalErr := k.PhysicalSnapshot(ctx, cfg)
 	for _, raw := range doc.Outputs {
-		panel := raw.Type == 7 || strings.HasPrefix(raw.Name, "eDP-") || strings.HasPrefix(raw.Name, "LVDS-") || strings.HasPrefix(raw.Name, "DSI-")
-		id := k.deviceID(raw.Name, raw.UUID)
+		panel := raw.Type == 7 || panelConnector(raw.Name)
+		id := fallbackDeviceID(raw.Name, raw.UUID)
 		output := Output{
 			ID: raw.ID, DeviceID: id, UUID: raw.UUID, Connector: raw.Name, Label: raw.Name,
 			Panel: panel, Connected: raw.Connected, Enabled: raw.Enabled, Priority: raw.Priority,
 			Scale: raw.Scale, X: raw.Position.X, Y: raw.Position.Y, Width: raw.Size.Width, Height: raw.Size.Height,
 			CurrentModeID: raw.CurrentModeID, PreferredModeIDs: raw.PreferredModes,
 			ReplicationSource: raw.ReplicationSource,
+		}
+		if physicalErr == nil {
+			if current, ok := physicalOutput(physical.Outputs, raw.Name); ok {
+				output.Connected = current.Connected
+				if current.DeviceID != "" {
+					id = current.DeviceID
+					output.DeviceID = id
+				}
+			}
 		}
 		if rule, ok := cfg.Rule(id); ok && rule.Label != "" {
 			output.Label = rule.Label
@@ -130,14 +142,7 @@ func approved(cfg config.Config, id string) bool {
 	}
 }
 
-func (k *KScreen) deviceID(connector, uuid string) string {
-	matches, _ := filepath.Glob(filepath.Join(k.DRMRoot, "card*-"+connector, "edid"))
-	for _, path := range matches {
-		if edid, err := os.ReadFile(path); err == nil && len(edid) >= 128 {
-			sum := sha256.Sum256(edid)
-			return "edid:" + hex.EncodeToString(sum[:])
-		}
-	}
+func fallbackDeviceID(connector, uuid string) string {
 	if uuid != "" {
 		return "kde:" + uuid
 	}

@@ -37,10 +37,18 @@ builds:
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags: [-s -w]
+  - id: dockstar-startup-helper
+    main: ./cmd/dockstar-startup-helper
+    binary: dockstar-startup-helper
+    goos: [linux]
+    goarch: [amd64]
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: [-s -w]
 
 archives:
   - id: dockstar
-    ids: [dockstar, dockstar-ui, dockstar-wake-helper]
+    ids: [dockstar, dockstar-ui, dockstar-wake-helper, dockstar-startup-helper]
     formats: [tar.gz]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
@@ -57,10 +65,11 @@ archives:
       - man/*
       - packaging/desktop/*
       - packaging/systemd/*
+      - packaging/polkit/*
 
 nfpms:
   - id: dockstar-packages
-    ids: [dockstar, dockstar-ui, dockstar-wake-helper]
+    ids: [dockstar, dockstar-ui, dockstar-wake-helper, dockstar-startup-helper]
     package_name: dockstar
     vendor: RedUndercover
     homepage: https://github.com/redundercover/dockstar
@@ -75,6 +84,8 @@ nfpms:
         dst: /usr/lib/systemd/user/dockstar.service
       - src: packaging/systemd/dockstar-wakeup.service
         dst: /usr/lib/systemd/system/dockstar-wakeup.service
+      - src: packaging/systemd/dockstar-startup.service
+        dst: /usr/lib/systemd/system/dockstar-startup.service
       - src: packaging/systemd/50-dockstar-sleep
         dst: /usr/lib/systemd/system-sleep/50-dockstar
         file_info: {mode: 0755}
@@ -82,6 +93,8 @@ nfpms:
         dst: /usr/share/dbus-1/services/io.github.redundercover.Dockstar.service
       - src: packaging/polkit/io.github.redundercover.Dockstar.policy
         dst: /usr/share/polkit-1/actions/io.github.redundercover.Dockstar.policy
+      - src: packaging/polkit/io.github.redundercover.Dockstar.Startup.policy
+        dst: /usr/share/polkit-1/actions/io.github.redundercover.Dockstar.Startup.policy
       - src: packaging/desktop/io.github.redundercover.Dockstar.desktop
         dst: /usr/share/applications/io.github.redundercover.Dockstar.desktop
       - src: packaging/desktop/io.github.redundercover.Dockstar.Tray.desktop
@@ -119,11 +132,11 @@ nfpms:
         type: tree
     overrides:
       deb:
-        dependencies: [libwebkit2gtk-4.1-0, libgtk-3-0, policykit-1]
+        dependencies: [libwebkit2gtk-4.1-0, libgtk-3-0, policykit-1, "systemd (>= 257)"]
       rpm:
-        dependencies: [webkit2gtk4.1, gtk3, polkit]
+        dependencies: [webkit2gtk4.1, gtk3, polkit, "systemd >= 257"]
       archlinux:
-        dependencies: [webkit2gtk-4.1, gtk3, polkit]
+        dependencies: [webkit2gtk-4.1, gtk3, polkit, "systemd>=257"]
     archlinux:
       scripts:
         postupgrade: packaging/scripts/postinstall.sh

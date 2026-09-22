@@ -14,47 +14,84 @@ import (
 	"github.com/redundercover/dockstar/internal/config"
 )
 
+type commandFunc func(context.Context, string, ...string) (string, error)
+
 type Manager struct {
 	mu              sync.Mutex
 	oldAudio        string
 	oldPower        string
 	startedEthernet string
 	wifiDisabled    bool
+	command         commandFunc
 }
 
 func (m *Manager) Dock(ctx context.Context, cfg config.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	var failures []error
-	if cfg.Audio.Restore && m.oldAudio == "" {
-		m.oldAudio, _ = command(ctx, "/usr/bin/pactl", "get-default-sink")
-	}
-	if cfg.Power.Restore && m.oldPower == "" {
-		m.oldPower, _ = command(ctx, "/usr/bin/powerprofilesctl", "get")
-	}
 	if cfg.Audio.Policy == "prefer-display" {
-		if err := preferDisplayAudio(ctx); err != nil {
-			failures = append(failures, err)
-		}
-	}
-	if cfg.Network.Policy != "unchanged" {
-		device, err := connectWired(ctx)
-		if err != nil {
-			failures = append(failures, err)
-		} else if device != "" {
-			m.startedEthernet = device
-		}
-		if cfg.Network.Policy == "wired-only" && device != "" {
-			if _, err := command(ctx, "/usr/bin/nmcli", "radio", "wifi", "off"); err != nil {
-				failures = append(failures, err)
+		canChange := true
+		if cfg.Audio.Restore && m.oldAudio == "" {
+			previous, err := m.runCommand(ctx, "/usr/bin/pactl", "get-default-sink")
+			if err != nil {
+				failures = append(failures, fmt.Errorf("save audio sink: %w", err))
+				canChange = false
+			} else if previous == "" {
+				failures = append(failures, errors.New("save audio sink: pactl returned an empty sink"))
+				canChange = false
 			} else {
-				m.wifiDisabled = true
+				m.oldAudio = previous
+			}
+		}
+		if canChange {
+			if err := preferDisplayAudio(ctx, m.runCommand); err != nil {
+				failures = append(failures, err)
 			}
 		}
 	}
+
+	if cfg.Network.Policy != "unchanged" {
+		device, started, err := connectWired(ctx, m.runCommand, m.startedEthernet)
+		if started && m.startedEthernet == "" {
+			m.startedEthernet = device
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("connect Ethernet: %w", err))
+		}
+		if cfg.Network.Policy == "wired-only" && device != "" && err == nil && !m.wifiDisabled {
+			state, err := m.runCommand(ctx, "/usr/bin/nmcli", "radio", "wifi")
+			if err != nil {
+				failures = append(failures, fmt.Errorf("read WiFi radio state: %w", err))
+			} else if state == "enabled" {
+				m.wifiDisabled = true
+				if _, err := m.runCommand(ctx, "/usr/bin/nmcli", "radio", "wifi", "off"); err != nil {
+					failures = append(failures, fmt.Errorf("disable WiFi: %w", err))
+				}
+			} else if state != "disabled" {
+				failures = append(failures, fmt.Errorf("read WiFi radio state: unexpected state %q", state))
+			}
+		}
+	}
+
 	if cfg.Power.OnACProfile != "unchanged" && onACPower() {
-		if _, err := command(ctx, "/usr/bin/powerprofilesctl", "set", cfg.Power.OnACProfile); err != nil {
-			failures = append(failures, err)
+		canChange := true
+		if cfg.Power.Restore && m.oldPower == "" {
+			previous, err := m.runCommand(ctx, "/usr/bin/powerprofilesctl", "get")
+			if err != nil {
+				failures = append(failures, fmt.Errorf("save power profile: %w", err))
+				canChange = false
+			} else if previous == "" {
+				failures = append(failures, errors.New("save power profile: powerprofilesctl returned an empty profile"))
+				canChange = false
+			} else {
+				m.oldPower = previous
+			}
+		}
+		if canChange {
+			if _, err := m.runCommand(ctx, "/usr/bin/powerprofilesctl", "set", cfg.Power.OnACProfile); err != nil {
+				failures = append(failures, fmt.Errorf("set docked power profile: %w", err))
+			}
 		}
 	}
 	return errors.Join(failures...)
@@ -63,35 +100,55 @@ func (m *Manager) Dock(ctx context.Context, cfg config.Config) error {
 func (m *Manager) Undock(ctx context.Context, cfg config.Config) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	var failures []error
-	if cfg.Audio.Restore && m.oldAudio != "" {
-		_, err := command(ctx, "/usr/bin/pactl", "set-default-sink", m.oldAudio)
-		failures = appendIf(failures, err)
+	if !cfg.Audio.Restore {
 		m.oldAudio = ""
+	} else if m.oldAudio != "" {
+		if _, err := m.runCommand(ctx, "/usr/bin/pactl", "set-default-sink", m.oldAudio); err != nil {
+			failures = append(failures, fmt.Errorf("restore audio sink %q: %w", m.oldAudio, err))
+		} else {
+			m.oldAudio = ""
+		}
 	}
-	if cfg.Power.Restore && m.oldPower != "" {
-		_, err := command(ctx, "/usr/bin/powerprofilesctl", "set", m.oldPower)
-		failures = appendIf(failures, err)
+	if !cfg.Power.Restore {
 		m.oldPower = ""
+	} else if m.oldPower != "" {
+		if _, err := m.runCommand(ctx, "/usr/bin/powerprofilesctl", "set", m.oldPower); err != nil {
+			failures = append(failures, fmt.Errorf("restore power profile %q: %w", m.oldPower, err))
+		} else {
+			m.oldPower = ""
+		}
 	}
 	if m.startedEthernet != "" {
-		_, err := command(ctx, "/usr/bin/nmcli", "device", "disconnect", m.startedEthernet)
-		failures = appendIf(failures, err)
-		m.startedEthernet = ""
+		device, state, err := ethernetState(ctx, m.runCommand, m.startedEthernet)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("inspect Ethernet device %q: %w", m.startedEthernet, err))
+		} else if device == "" || state == "disconnected" {
+			m.startedEthernet = ""
+		} else if state != "connected" {
+			failures = append(failures, fmt.Errorf("restore Ethernet device %q: unexpected state %q", m.startedEthernet, state))
+		} else if _, err := m.runCommand(ctx, "/usr/bin/nmcli", "device", "disconnect", m.startedEthernet); err != nil {
+			failures = append(failures, fmt.Errorf("disconnect Ethernet device %q: %w", m.startedEthernet, err))
+		} else {
+			m.startedEthernet = ""
+		}
 	}
 	if m.wifiDisabled {
-		_, err := command(ctx, "/usr/bin/nmcli", "radio", "wifi", "on")
-		failures = appendIf(failures, err)
-		m.wifiDisabled = false
+		if _, err := m.runCommand(ctx, "/usr/bin/nmcli", "radio", "wifi", "on"); err != nil {
+			failures = append(failures, fmt.Errorf("restore WiFi radio: %w", err))
+		} else {
+			m.wifiDisabled = false
+		}
 	}
 	return errors.Join(failures...)
 }
 
-func appendIf(values []error, err error) []error {
-	if err != nil {
-		return append(values, err)
+func (m *Manager) runCommand(ctx context.Context, binary string, args ...string) (string, error) {
+	if m.command != nil {
+		return m.command(ctx, binary, args...)
 	}
-	return values
+	return command(ctx, binary, args...)
 }
 
 func command(ctx context.Context, binary string, args ...string) (string, error) {
@@ -104,8 +161,8 @@ func command(ctx context.Context, binary string, args ...string) (string, error)
 	return strings.TrimSpace(string(out)), nil
 }
 
-func preferDisplayAudio(ctx context.Context) error {
-	output, err := command(ctx, "/usr/bin/pactl", "-f", "json", "list", "sinks")
+func preferDisplayAudio(ctx context.Context, run commandFunc) error {
+	output, err := run(ctx, "/usr/bin/pactl", "-f", "json", "list", "sinks")
 	if err != nil {
 		return err
 	}
@@ -119,33 +176,49 @@ func preferDisplayAudio(ctx context.Context) error {
 	for _, sink := range sinks {
 		candidate := strings.ToLower(sink.Name + " " + sink.Description)
 		if strings.Contains(candidate, "hdmi") || strings.Contains(candidate, "displayport") {
-			_, err := command(ctx, "/usr/bin/pactl", "set-default-sink", sink.Name)
+			_, err := run(ctx, "/usr/bin/pactl", "set-default-sink", sink.Name)
 			return err
 		}
 	}
 	return errors.New("no HDMI or DisplayPort audio sink is available")
 }
 
-func connectWired(ctx context.Context) (string, error) {
-	output, err := command(ctx, "/usr/bin/nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status")
+func connectWired(ctx context.Context, run commandFunc, pending string) (string, bool, error) {
+	device, state, err := ethernetState(ctx, run, pending)
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	if device == "" {
+		if pending != "" {
+			return pending, false, fmt.Errorf("saved Ethernet device %q is unavailable", pending)
+		}
+		return "", false, nil
+	}
+	if state == "connected" {
+		return device, false, nil
+	}
+	if state == "disconnected" {
+		_, err := run(ctx, "/usr/bin/nmcli", "device", "connect", device)
+		return device, true, err
+	}
+	return device, false, fmt.Errorf("Ethernet device %q is %s", device, state)
+}
+
+func ethernetState(ctx context.Context, run commandFunc, pending string) (string, string, error) {
+	output, err := run(ctx, "/usr/bin/nmcli", "-t", "-f", "DEVICE,TYPE,STATE", "device", "status")
+	if err != nil {
+		return "", "", err
 	}
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Split(line, ":")
-		if len(fields) >= 3 && fields[1] == "ethernet" {
-			if fields[2] == "connected" {
-				return "", nil
-			}
-			if fields[2] == "disconnected" {
-				if _, err := command(ctx, "/usr/bin/nmcli", "device", "connect", fields[0]); err != nil {
-					return "", err
-				}
-				return fields[0], nil
-			}
+		if len(fields) < 3 || fields[1] != "ethernet" {
+			continue
+		}
+		if pending != "" && fields[0] == pending || pending == "" && fields[2] == "disconnected" {
+			return fields[0], fields[2], nil
 		}
 	}
-	return "", nil
+	return "", "", nil
 }
 
 func onACPower() bool {
@@ -197,6 +270,6 @@ func Suspend(ctx context.Context) error {
 	}
 	defer conn.Close()
 	return conn.Object("org.freedesktop.login1", "/org/freedesktop/login1").CallWithContext(
-		ctx, "org.freedesktop.login1.Manager.Suspend", dbus.FlagNoReplyExpected, true,
+		ctx, "org.freedesktop.login1.Manager.Suspend", 0, false,
 	).Err
 }

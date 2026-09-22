@@ -190,12 +190,17 @@ Dockstar applies the profile only when a supply of type `Mains` reports
 Restore baselines are stored only in daemon memory. A daemon restart while
 docked loses the original pre-dock baseline. Restore manually, undock and dock
 again, or restart Dockstar while undocked before the next session.
+Without a restart, failed restoration remains pending and retries automatically;
+inspect `dockstar status` for `lastError`. Successful items are not repeated.
+Audio/power `restore: false` deliberately discards the saved baseline on undock.
 
 ## Closed-lid undock did not suspend
 
 Both `lockOnClosedUndock` and `suspendOnClosedUndock` must be true. The daemon
 must first have observed an active dock, then observe no approved external while
 PowerDevil reports the lid closed.
+A successful layout is not required. A re-dock, opened lid, policy/config change,
+sleep/resume, or unknown connectivity/lid state cancels the delayed request.
 
 Check PowerDevil and logind:
 
@@ -236,47 +241,98 @@ not generate a wake event.
 
 ## Sleep protection is unavailable
 
-Inspect the daemon's structured status and both inhibition managers:
+Inspect the daemon's structured status and logind inhibitor list:
 
 ```sh
 dockstar status | jq '.sleepProtection'
-qdbus6 org.kde.Solid.PowerManagement \
-  /org/kde/Solid/PowerManagement/PolicyAgent \
-  org.freedesktop.DBus.Properties.Get \
-  org.kde.Solid.PowerManagement.PolicyAgent ActiveInhibitions
 systemd-inhibit --list
 ```
 
-`backend: "powerdevil"` is the normal Plasma path. `backend: "logind"` with
-`degraded: true` means compatibility protection is active; restart the user
-service after PowerDevil is available to retry immediately:
+During a protected phase, the expected values are `active: true`, `backend:
+"logind"`, and `mode: "block"`, with a Dockstar row in
+`systemd-inhibit --list`. `backend: "none"` is normal while undocked or during
+`manual-suspend`. A `lastError` during `docked`, `resume-grace`,
+`undock-grace`, or `snapshot-grace` means the lease could not be acquired.
+
+Restart the user service after an upgrade or a logind restart:
 
 ```sh
 systemctl --user restart dockstar.service
+journalctl --user -u dockstar.service -b -n 100
 ```
 
-An error saying the inhibition was blocked in Plasma means the user explicitly
-disabled Dockstar's inhibition in the battery applet. Dockstar respects that
-choice and does not use logind to bypass it. Re-enable Dockstar in Plasma's
-active-inhibition UI, or turn off **Keep computer awake while docked** in
-Dockstar.
+If a docked state still reports `backend: "powerdevil"`, an older Dockstar
+daemon is running. Current builds report only `logind` or `none`; restart the
+service and verify the installed executable with `systemctl --user status
+dockstar.service`.
 
 ## Manual Sleep is blocked while docked
 
-In the normal `powerdevil` mode, explicit Plasma Sleep remains available. In
-`logind` compatibility mode, the lower-level inhibitor also blocks manual
-sleep. Turn off **Keep computer awake while docked** temporarily or restore
-PowerDevil and restart Dockstar. No global lid or suspend policy needs to be
-changed.
+This is expected while strict dock protection is active. Use **Suspend now**
+on Dockstar's **Wake & power** page or tray menu, or run:
+
+```sh
+dockstar suspend
+```
+
+Dockstar releases protection for that request and restores it after resume. Do
+not disable lid handling, edit `logind.conf`, or turn off the protection toggle
+for routine suspend.
+
+If the command reports an authorization or inhibition error, another system
+policy or application is blocking suspend. Dockstar deliberately does not open
+a Polkit prompt or request permission to ignore third-party inhibitors; inspect
+`systemd-inhibit --list` and the user-service journal.
+
+## Protection before login does not activate
+
+The Settings Startup switch controls only the user session. Pre-login
+protection requires the installed system helper/unit and explicit enrollment:
+
+```sh
+dockstar startup status
+systemctl status dockstar-startup.service
+journalctl -u dockstar-startup.service -b
+```
+
+If no policy is installed, approve a display with an `edid:` identity and run
+`dockstar startup enable`, authenticating as an administrator. Use
+`dockstar startup sync` after approval changes, including the final revocation.
+Settings → Displays shows pending differences and has the same authenticated
+controls. Trust-all never enrolls arbitrary displays.
+Source `make install-user` does not install the privileged boot components.
+
+At graphical login, the boot guard waits for a Dockstar sleep-block lease owned
+by a local graphical session's UID, or for its fixed 15-second timeout, then
+hands over. Locked sessions count as logged in. The guard does not reacquire
+during overlapping sessions after handoff. Inspect normal `dockstar status` and
+the user-service journal if it logs a handoff timeout. Unreadable physical state
+or boot policy still releases protection immediately.
 
 ## Login reports three failed attempts
 
 Dockstar does not submit passwords, synthesize authentication, change PAM, or
-retry login. Sleep protection is held through D-Bus inhibitor leases only. To
-separate a display-manager or authentication problem from Dockstar, disable
-startup and stop the current daemon session:
+retry login. Rapid suspend and resume cycles can nevertheless repeatedly return
+the machine to the display manager and make an authentication symptom appear
+alongside a power-policy problem.
+
+First verify that the upgraded daemon is running:
 
 ```sh
+systemctl --user restart dockstar.service
+dockstar status | jq '.sleepProtection.backend, .sleepProtection.mode'
+journalctl -b | grep -E 'PowerDevil|Suspending system|suspend requested'
+```
+
+`powerdevil` in Dockstar status identifies the removed implementation. The
+current implementation reports `logind` while protected and does not depend on
+PowerDevil application inhibition.
+
+To separate a display-manager or authentication problem from Dockstar, disable
+pre-login protection and stop the current daemon session:
+
+```sh
+dockstar startup disable
 systemctl --user disable --now dockstar.service
 ```
 
@@ -288,9 +344,10 @@ the installed display manager, useful units include `sddm.service` and
 journalctl -b -u sddm.service -u systemd-logind.service
 ```
 
-Re-enable Dockstar with `systemctl --user enable --now dockstar.service` after
-the authentication issue is understood. Toggling sleep protection off in the
-GUI releases an active Dockstar inhibitor immediately.
+Re-enable the user daemon with `systemctl --user enable --now dockstar.service`
+after the authentication issue is understood. Re-enroll approved boot devices
+with `dockstar startup enable` if desired. The GUI keep-awake toggle releases
+only the session inhibitor; boot enrollment is managed separately.
 
 ## Machine wakes too easily or uses more suspend power
 

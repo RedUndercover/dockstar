@@ -5,7 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,28 +14,31 @@ import (
 )
 
 const (
-	powerDevilService = "org.freedesktop.PowerManagement.Inhibit"
-	powerDevilPath    = dbus.ObjectPath("/org/freedesktop/PowerManagement/Inhibit")
-	powerDevilAPI     = "org.freedesktop.PowerManagement.Inhibit"
-	policyService     = "org.kde.Solid.PowerManagement"
-	policyPath        = dbus.ObjectPath("/org/kde/Solid/PowerManagement/PolicyAgent")
-	policyAPI         = "org.kde.Solid.PowerManagement.PolicyAgent"
-	loginService      = "org.freedesktop.login1"
-	loginPath         = dbus.ObjectPath("/org/freedesktop/login1")
-	loginAPI          = "org.freedesktop.login1.Manager"
-	applicationName   = "Dockstar"
-	fallbackName      = "Dockstar compatibility guard"
-	nativeWarmup      = 6 * time.Second
-	nativeRetry       = 5 * time.Second
+	loginService    = "org.freedesktop.login1"
+	loginPath       = dbus.ObjectPath("/org/freedesktop/login1")
+	loginAPI        = "org.freedesktop.login1.Manager"
+	systemdService  = "org.freedesktop.systemd1"
+	systemdPath     = dbus.ObjectPath("/org/freedesktop/systemd1")
+	systemdAPI      = "org.freedesktop.systemd1.Manager"
+	applicationName = "Dockstar"
+	inhibitReason   = "Protecting an active dock session"
+	inhibitWhat     = "sleep:idle:handle-lid-switch"
+	inhibitMode     = "block"
+	minimumSystemd  = 257
+
+	releaseConfirmationTimeout = time.Second
+	releaseConfirmationPoll    = 10 * time.Millisecond
 )
 
 type Status struct {
-	Enabled   bool   `json:"enabled"`
-	Active    bool   `json:"active"`
-	Phase     string `json:"phase"`
-	Backend   string `json:"backend"`
-	Degraded  bool   `json:"degraded"`
-	LastError string `json:"lastError,omitempty"`
+	Enabled    bool   `json:"enabled"`
+	Active     bool   `json:"active"`
+	Phase      string `json:"phase"`
+	Backend    string `json:"backend"`
+	Mode       string `json:"mode,omitempty"`
+	AcquiredAt string `json:"acquiredAt,omitempty"`
+	Degraded   bool   `json:"degraded"`
+	LastError  string `json:"lastError,omitempty"`
 }
 
 type lease interface {
@@ -42,29 +46,18 @@ type lease interface {
 	Release(context.Context) error
 }
 
-type nativeLease interface {
-	lease
-	Active(context.Context) (bool, error)
-}
-
 type factory interface {
-	Native(context.Context, string) (nativeLease, error)
-	Fallback(context.Context, string) (lease, error)
+	Acquire(context.Context) (lease, error)
 }
 
 type Coordinator struct {
 	mu sync.Mutex
 
-	factory  factory
-	now      func() time.Time
-	native   nativeLease
-	fallback lease
-	phase    string
-	reason   string
-	warmAt   time.Time
-	retryAt  time.Time
-	blocked  bool
-	status   Status
+	factory    factory
+	now        func() time.Time
+	lease      lease
+	acquiredAt time.Time
+	status     Status
 }
 
 func New() *Coordinator {
@@ -83,119 +76,44 @@ func (c *Coordinator) Ensure(ctx context.Context, phase string) Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.phase = phase
-	c.reason = reasonFor(phase)
-	c.status.Enabled = true
-	c.status.Phase = phase
-	c.status.LastError = ""
-	now := c.now()
-
-	if c.native != nil && !c.native.Valid(ctx) {
-		_ = c.native.Release(ctx)
-		c.native = nil
-		c.warmAt = time.Time{}
-		c.retryAt = now
-	}
-	if c.fallback != nil && !c.fallback.Valid(ctx) {
-		_ = c.fallback.Release(ctx)
-		c.fallback = nil
+	c.status = Status{Enabled: true, Phase: phase, Backend: "none"}
+	if c.lease != nil && !c.lease.Valid(ctx) {
+		_ = c.lease.Release(ctx)
+		c.lease = nil
+		c.acquiredAt = time.Time{}
 	}
 
-	if c.native == nil && !now.Before(c.retryAt) {
-		native, err := c.factory.Native(ctx, c.reason)
-		if err == nil {
-			c.native = native
-			c.warmAt = now.Add(nativeWarmup)
-			c.blocked = false
-		} else {
-			c.retryAt = now.Add(nativeRetry)
-			c.status.LastError = fmt.Sprintf("PowerDevil inhibition unavailable: %v", err)
-		}
-	}
-
-	if c.native != nil && !now.Before(c.warmAt) {
-		active, err := c.native.Active(ctx)
-		switch {
-		case err != nil:
-			_ = c.native.Release(ctx)
-			c.native = nil
-			c.retryAt = now.Add(nativeRetry)
-			c.status.LastError = fmt.Sprintf("verify PowerDevil inhibition: %v", err)
-		case active:
-			c.blocked = false
-			if c.fallback != nil {
-				_ = c.fallback.Release(ctx)
-				c.fallback = nil
-			}
-			c.status.Active = true
-			c.status.Backend = "powerdevil"
-			c.status.Degraded = false
-			return c.status
-		default:
-			c.blocked = true
-			if c.fallback != nil {
-				_ = c.fallback.Release(ctx)
-				c.fallback = nil
-			}
-			c.status.Active = false
-			c.status.Backend = "none"
+	if c.lease == nil {
+		acquired, err := c.factory.Acquire(ctx)
+		if err != nil {
 			c.status.Degraded = true
-			c.status.LastError = "Dockstar sleep protection was blocked in Plasma"
+			c.status.LastError = "logind sleep protection unavailable: " + err.Error()
 			return c.status
 		}
-	}
-
-	if c.blocked {
-		c.status.Active = false
-		c.status.Backend = "none"
-		c.status.Degraded = true
-		c.status.LastError = "Dockstar sleep protection was blocked in Plasma"
-		return c.status
-	}
-
-	if c.fallback == nil {
-		fallback, err := c.factory.Fallback(ctx, c.reason)
-		if err == nil {
-			c.fallback = fallback
-		} else {
-			c.status.Active = false
-			c.status.Backend = "none"
-			c.status.Degraded = true
-			fallbackError := fmt.Sprintf("logind inhibition unavailable: %v", err)
-			if c.status.LastError == "" {
-				c.status.LastError = fallbackError
-			} else {
-				c.status.LastError += "; " + fallbackError
-			}
-			return c.status
-		}
+		c.lease = acquired
+		c.acquiredAt = c.now().UTC()
 	}
 
 	c.status.Active = true
 	c.status.Backend = "logind"
-	c.status.Degraded = c.native == nil
+	c.status.Mode = inhibitMode
+	c.status.AcquiredAt = c.acquiredAt.Format(time.RFC3339Nano)
 	return c.status
 }
 
 func (c *Coordinator) Release(ctx context.Context) Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var failures []error
-	if c.native != nil {
-		failures = appendIf(failures, c.native.Release(ctx))
-		c.native = nil
+
+	status := Status{Phase: "inactive", Backend: "none"}
+	if c.lease != nil {
+		if err := c.lease.Release(ctx); err != nil {
+			status.LastError = err.Error()
+		}
+		c.lease = nil
 	}
-	if c.fallback != nil {
-		failures = appendIf(failures, c.fallback.Release(ctx))
-		c.fallback = nil
-	}
-	c.phase, c.reason = "", ""
-	c.warmAt, c.retryAt = time.Time{}, time.Time{}
-	c.blocked = false
-	c.status = Status{Phase: "inactive", Backend: "none"}
-	if err := errors.Join(failures...); err != nil {
-		c.status.LastError = err.Error()
-	}
+	c.acquiredAt = time.Time{}
+	c.status = status
 	return c.status
 }
 
@@ -209,48 +127,9 @@ func (c *Coordinator) Close() error {
 	return nil
 }
 
-func reasonFor(phase string) string {
-	switch phase {
-	case "resume-grace":
-		return "Waiting for an approved dock after resume"
-	case "undock-grace":
-		return "Waiting for a disconnected dock to settle"
-	default:
-		return "Approved external dock is active"
-	}
-}
-
-func appendIf(values []error, err error) []error {
-	if err != nil {
-		return append(values, err)
-	}
-	return values
-}
-
 type realFactory struct{}
 
-func (realFactory) Native(ctx context.Context, reason string) (nativeLease, error) {
-	conn, err := dbus.ConnectSessionBus()
-	if err != nil {
-		return nil, err
-	}
-	owner, err := getOwner(ctx, conn, policyService)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("PowerDevil is not running: %w", err)
-	}
-	var cookie uint32
-	call := conn.Object(powerDevilService, powerDevilPath).CallWithContext(
-		ctx, powerDevilAPI+".Inhibit", 0, applicationName, reason,
-	)
-	if err := call.Store(&cookie); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return &powerDevilLease{conn: conn, cookie: cookie, owner: owner, reason: reason}, nil
-}
-
-func (realFactory) Fallback(ctx context.Context, reason string) (lease, error) {
+func (realFactory) Acquire(ctx context.Context) (lease, error) {
 	conn, err := dbus.ConnectSystemBus()
 	if err != nil {
 		return nil, err
@@ -259,6 +138,15 @@ func (realFactory) Fallback(ctx context.Context, reason string) (lease, error) {
 		conn.Close()
 		return nil, errors.New("system bus does not support Unix file descriptors")
 	}
+	version, err := systemdMajorVersion(ctx, conn)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("check systemd sleep-inhibitor support: %w", err)
+	}
+	if version < minimumSystemd {
+		conn.Close()
+		return nil, fmt.Errorf("systemd %d is unsupported; strict sleep protection requires systemd %d or newer", version, minimumSystemd)
+	}
 	owner, err := getOwner(ctx, conn, loginService)
 	if err != nil {
 		conn.Close()
@@ -266,7 +154,7 @@ func (realFactory) Fallback(ctx context.Context, reason string) (lease, error) {
 	}
 	var fd dbus.UnixFD
 	call := conn.Object(loginService, loginPath).CallWithContext(
-		ctx, loginAPI+".Inhibit", 0, "sleep", fallbackName, reason, "block",
+		ctx, loginAPI+".Inhibit", 0, inhibitWhat, applicationName, inhibitReason, inhibitMode,
 	)
 	if err := call.Store(&fd); err != nil {
 		conn.Close()
@@ -277,48 +165,14 @@ func (realFactory) Fallback(ctx context.Context, reason string) (lease, error) {
 		conn.Close()
 		return nil, errors.New("logind returned an invalid inhibitor descriptor")
 	}
-	return &logindLease{conn: conn, file: file, owner: owner}, nil
-}
-
-type powerDevilLease struct {
-	conn   *dbus.Conn
-	cookie uint32
-	owner  string
-	reason string
-}
-
-func (l *powerDevilLease) Valid(ctx context.Context) bool {
-	owner, err := getOwner(ctx, l.conn, policyService)
-	return err == nil && owner == l.owner
-}
-
-func (l *powerDevilLease) Active(ctx context.Context) (bool, error) {
-	var variant dbus.Variant
-	err := l.conn.Object(policyService, policyPath).CallWithContext(
-		ctx, "org.freedesktop.DBus.Properties.Get", 0, policyAPI, "ActiveInhibitions",
-	).Store(&variant)
-	if err != nil {
-		return false, err
-	}
-	return containsStrings(reflect.ValueOf(variant.Value()), applicationName, l.reason), nil
-}
-
-func (l *powerDevilLease) Release(ctx context.Context) error {
-	if l.conn == nil {
-		return nil
-	}
-	err := l.conn.Object(powerDevilService, powerDevilPath).CallWithContext(
-		ctx, powerDevilAPI+".UnInhibit", 0, l.cookie,
-	).Err
-	l.conn.Close()
-	l.conn = nil
-	return err
+	return &logindLease{conn: conn, file: file, owner: owner, pid: uint32(os.Getpid())}, nil
 }
 
 type logindLease struct {
 	conn  *dbus.Conn
 	file  *os.File
 	owner string
+	pid   uint32
 }
 
 func (l *logindLease) Valid(ctx context.Context) bool {
@@ -326,16 +180,108 @@ func (l *logindLease) Valid(ctx context.Context) bool {
 	return err == nil && owner == l.owner && l.file != nil
 }
 
-func (l *logindLease) Release(context.Context) error {
+func (l *logindLease) Release(ctx context.Context) error {
+	var failures []error
 	if l.file != nil {
-		_ = l.file.Close()
+		if err := l.file.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close logind inhibitor descriptor: %w", err))
+		}
 		l.file = nil
 	}
 	if l.conn != nil {
-		l.conn.Close()
+		if err := waitForRelease(ctx, l.conn, l.pid); err != nil {
+			failures = append(failures, err)
+		}
+		if err := l.conn.Close(); err != nil {
+			failures = append(failures, fmt.Errorf("close logind connection: %w", err))
+		}
 		l.conn = nil
 	}
-	return nil
+	return errors.Join(failures...)
+}
+
+type inhibitorRecord struct {
+	What string
+	Who  string
+	Why  string
+	Mode string
+	UID  uint32
+	PID  uint32
+}
+
+func waitForRelease(ctx context.Context, conn *dbus.Conn, pid uint32) error {
+	waitCtx, cancel := context.WithTimeout(ctx, releaseConfirmationTimeout)
+	defer cancel()
+	ticker := time.NewTicker(releaseConfirmationPoll)
+	defer ticker.Stop()
+
+	for {
+		present, err := inhibitorPresent(waitCtx, conn, pid)
+		if err != nil {
+			return fmt.Errorf("confirm logind inhibitor release: %w", err)
+		}
+		if !present {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("confirm logind inhibitor release: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func inhibitorPresent(ctx context.Context, conn *dbus.Conn, pid uint32) (bool, error) {
+	var entries []inhibitorRecord
+	if err := conn.Object(loginService, loginPath).CallWithContext(
+		ctx, loginAPI+".ListInhibitors", 0,
+	).Store(&entries); err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if inhibitsSleep(entry.What) && entry.Who == applicationName && entry.Mode == inhibitMode && entry.PID == pid {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func inhibitsSleep(what string) bool {
+	for _, category := range strings.Split(what, ":") {
+		if category == "sleep" {
+			return true
+		}
+	}
+	return false
+}
+
+func systemdMajorVersion(ctx context.Context, conn *dbus.Conn) (int, error) {
+	var property dbus.Variant
+	if err := conn.Object(systemdService, systemdPath).CallWithContext(
+		ctx, "org.freedesktop.DBus.Properties.Get", 0, systemdAPI, "Version",
+	).Store(&property); err != nil {
+		return 0, err
+	}
+	value, ok := property.Value().(string)
+	if !ok {
+		return 0, fmt.Errorf("systemd returned version as %T", property.Value())
+	}
+	return parseSystemdMajorVersion(value)
+}
+
+func parseSystemdMajorVersion(value string) (int, error) {
+	end := 0
+	for end < len(value) && value[end] >= '0' && value[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0, fmt.Errorf("invalid systemd version %q", value)
+	}
+	version, err := strconv.Atoi(value[:end])
+	if err != nil {
+		return 0, fmt.Errorf("parse systemd version %q: %w", value, err)
+	}
+	return version, nil
 }
 
 func getOwner(ctx context.Context, conn *dbus.Conn, service string) (string, error) {
@@ -344,65 +290,4 @@ func getOwner(ctx context.Context, conn *dbus.Conn, service string) (string, err
 		ctx, "org.freedesktop.DBus.GetNameOwner", 0, service,
 	).Store(&owner)
 	return owner, err
-}
-
-func containsStrings(value reflect.Value, wanted ...string) bool {
-	if !value.IsValid() {
-		return false
-	}
-	if value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
-		return containsStrings(value.Elem(), wanted...)
-	}
-	if value.Kind() != reflect.Array && value.Kind() != reflect.Slice {
-		return false
-	}
-	for i := 0; i < value.Len(); i++ {
-		item := value.Index(i)
-		values := collectStrings(item)
-		matched := true
-		for _, candidate := range wanted {
-			found := false
-			for _, actual := range values {
-				if actual == candidate {
-					found = true
-					break
-				}
-			}
-			if !found {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true
-		}
-	}
-	return false
-}
-
-func collectStrings(value reflect.Value) []string {
-	if !value.IsValid() {
-		return nil
-	}
-	if value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
-		return collectStrings(value.Elem())
-	}
-	switch value.Kind() {
-	case reflect.String:
-		return []string{value.String()}
-	case reflect.Array, reflect.Slice:
-		var values []string
-		for i := 0; i < value.Len(); i++ {
-			values = append(values, collectStrings(value.Index(i))...)
-		}
-		return values
-	case reflect.Struct:
-		var values []string
-		for i := 0; i < value.NumField(); i++ {
-			values = append(values, collectStrings(value.Field(i))...)
-		}
-		return values
-	default:
-		return nil
-	}
 }

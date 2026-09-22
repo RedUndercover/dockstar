@@ -1,6 +1,7 @@
 [Unit]
 Description=Apply Dockstar hardware wake policy
 After=local-fs.target
+ConditionPathExists=/etc/dockstar/wake.json
 
 [Service]
 Type=oneshot

@@ -14,6 +14,8 @@ tour of the same codebase.
   output.
 - [Configuration reference](configuration.md): the complete schema, defaults,
   validation, identity rules, and examples.
+- [Sleep protection](sleep-protection.md): the logind lease, deliberate
+  suspend path, timing, verification, and desktop-policy handoff.
 - [Hardware wake](wake.md): setup, privilege boundary, controller discovery,
   restore behavior, and firmware limitations.
 - [Troubleshooting](troubleshooting.md): diagnostics organized by symptom.
@@ -33,5 +35,6 @@ tour of the same codebase.
 ## Version scope
 
 These documents describe schema version 2 and the Go implementation.
-Version 1 targets Linux amd64 running KDE Plasma 6 on Wayland. X11, GNOME,
-wlroots compositors, and arm64 are outside the current compatibility promise.
+Version 1 targets Linux amd64 running KDE Plasma 6 on Wayland with systemd 257
+or newer. X11, GNOME, wlroots compositors, and arm64 are outside the current
+compatibility promise.

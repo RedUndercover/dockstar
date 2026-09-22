@@ -18,21 +18,25 @@ configure it.
 
 Hardware wake and sleep protection solve different halves of the same flow.
 When the root-owned wake policy is enabled, `PrepareForSleep(false)` starts a
-20-second resume guard before display discovery. This prevents a closed-lid
-machine from immediately following its normal automatic sleep policy while
-KWin is still discovering the dock. As soon as an approved display appears,
-the guard becomes docked protection. If none appears, it expires and releases
-all inhibitors.
+30-second resume guard before display discovery. The same guard starts when
+Dockstar observed a docked or lid-closed state before sleep. This prevents a
+closed-lid machine from immediately following its normal automatic sleep
+policy while KWin is still discovering the dock. As soon as an approved
+display appears, the guard becomes docked protection. If none appears, it
+expires and releases the inhibitor; an open-lid undocked result releases it
+early.
 
 The user-level `power.keepAwakeWhileDocked` setting controls this behavior and
 defaults to enabled. It does not enable hardware wake by itself. Dockstar does
 not require users to select **Do nothing** for lid-close behavior and does not
 modify Plasma power settings, logind configuration, PAM, or authentication.
 
-PowerDevil is the preferred backend because explicit Plasma Sleep commands
-bypass application inhibition. A logind inhibitor covers PowerDevil's startup
-delay and is used as a compatibility fallback. The GUI reports which backend
-is active; see [Troubleshooting](troubleshooting.md#sleep-protection-is-unavailable).
+Dockstar uses one persistent logind `sleep` block because PowerDevil can treat
+lid-close policy as explicit and bypass an application inhibitor. While the
+lease is active, use Dockstar's **Suspend now** action or `dockstar suspend`
+for a deliberate one-cycle release. See [Sleep Protection](sleep-protection.md)
+for the lifecycle and [Troubleshooting](troubleshooting.md#sleep-protection-is-unavailable)
+for diagnostics.
 
 ## Package requirement
 
@@ -43,7 +47,7 @@ Hardware wake setup requires these system-installed files:
 | `/usr/bin/dockstar-wake-helper` | Narrow root helper |
 | `/usr/share/polkit-1/actions/io.github.redundercover.Dockstar.policy` | Authorization policy |
 | `/usr/lib/systemd/system-sleep/50-dockstar` | Reapply policy after resume |
-| `/usr/lib/systemd/system/dockstar-wakeup.service` | Optional one-shot policy application |
+| `/usr/lib/systemd/system/dockstar-wakeup.service` | Reapply the saved policy at boot |
 
 The GUI also requires the system `pkexec` executable supplied by Polkit so it
 can show the desktop authorization prompt without running the UI or daemon as
@@ -122,8 +126,15 @@ dockstar-wake-helper apply
 ```
 
 after resume. If no policy exists, the helper fails harmlessly and the hook
-continues. The optional `dockstar-wakeup.service` performs the same one-shot
-operation and is not enabled by Dockstar automatically.
+continues. Native packages enable `dockstar-wakeup.service`, which performs the
+same one-shot operation at boot. The service has no effect until
+`/etc/dockstar/wake.json` exists, so installing Dockstar does not enable
+hardware wake by itself.
+
+Package upgrades also start the service once. This immediately reapplies an
+existing policy and ensures that installations from versions which left the
+service disabled become persistent without another wake authorization prompt.
+Source-only user installations do not install or enable the system service.
 
 ## Privilege boundary
 

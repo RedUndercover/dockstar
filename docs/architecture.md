@@ -11,7 +11,7 @@ The main ownership rules are:
 - Only the daemon owns mutable desktop state and configuration writes.
 - The CLI, tray, and settings window are D-Bus clients.
 - Display enumeration and layout application live behind `display.Backend`.
-- Only `dockstar-wake-helper` writes privileged system state.
+- Only the fixed wake and startup helpers write privileged system state.
 - Configuration and D-Bus payloads are versioned or revision checked.
 
 ## Process model
@@ -47,10 +47,11 @@ Quit from the tray ends the UI process. The daemon remains independent in all
 cases.
 
 The Go adapter in `cmd/dockstar-ui` exposes typed state, configuration, apply,
-approval, wake, and diagnostic methods to JavaScript. Each operation remains a
-D-Bus call to the daemon. The frontend under `cmd/dockstar-ui/frontend` owns
-rendering, draft state, navigation, outcome previews, and responsive layout;
-it never writes the configuration file directly.
+approval, suspend, wake, and diagnostic methods to JavaScript. Each operation
+remains a D-Bus call to the daemon. The frontend under
+`cmd/dockstar-ui/frontend` owns rendering, draft state, navigation, outcome
+previews, and responsive layout; it never writes the configuration file
+directly.
 
 ### `dockstar-wake-helper`
 
@@ -58,12 +59,28 @@ The helper has no D-Bus or display responsibilities. It validates one fixed
 action, discovers eligible PCI controllers and USB root hubs, and reads or
 writes only Dockstar policy files and derived sysfs wake paths.
 
+### Pre-login protection
+
+`dockstar startup-guard` runs in the hardened system
+`dockstar-startup.service`, before the display manager. It reads physical DRM
+connections and a root-owned allowlist without a user bus, compositor, or home
+directory. Only an enrolled external EDID can acquire its lease. Policy,
+hardware, or logind query errors release protection.
+
+`dockstar-startup-helper` accepts enable/disable through Polkit. Enable snapshots
+explicit user approvals into `/var/lib/dockstar/startup.json` and enables the
+system unit. Changes to session approvals do not silently mutate boot policy;
+authenticated re-enrollment replaces the list. The guard hands off whenever a
+local graphical user session exists, including a locked session, so it cannot
+block the session daemon's intentional suspend path.
+
 ## Daemon state machine
 
 The controller evaluates once at startup, every two seconds, and after resume.
-Resume events come from logind `PrepareForSleep(false)`. When hardware wake is
-enabled, the daemon immediately starts a bounded resume guard and polls quickly
-for up to 20 seconds while KWin and DRM rediscover the dock.
+Sleep and resume events come from logind `PrepareForSleep`. After resume, the
+daemon starts a bounded guard when the pre-sleep state was docked or lid-closed,
+or when hardware wake is enabled. It polls for up to 30 seconds while KWin and
+DRM rediscover the dock, with an early release for an open-lid undocked state.
 
 ```mermaid
 stateDiagram-v2
@@ -78,24 +95,32 @@ stateDiagram-v2
     Undocked --> Docked: new approved external
 ```
 
-The debounce signature contains each connected output's Dockstar ID and
-approval boolean plus the lid state. It intentionally does not include every
-mode or geometry field. `Apply`, layout changes, config changes, and resume can
-force evaluation despite an unchanged signature.
+The debounce signature contains both compositor and physical connected-output
+IDs and approvals, plus lid state. It intentionally excludes mode and geometry.
+The signature is committed only after successful layout processing, so failed
+transactions retry. `Apply`, layout changes, config changes, and resume can
+force evaluation despite an unchanged signature. Physical safety transitions,
+published dock state, and applied platform-action state are separate, preserving
+security and pending restorations across discovery/apply failures.
 
 ## Evaluation flow
 
 1. Load an immutable config copy from the store.
-2. Query `kscreen-doctor -j` and translate outputs into `display.Snapshot`.
+2. Read physical DRM connections and query `kscreen-doctor -j` for layout state.
 3. Query PowerDevil for lid state.
-4. Separate approved and pending external outputs.
-5. Reconcile the sleep-protection lease, even when the display signature is unchanged.
-6. Skip the remaining work for an unchanged signature unless forced.
+4. Determine docking from approved physical externals, falling back to compositor
+   discovery if DRM cannot be read.
+5. Observe known physical security transitions and reconcile sleep protection,
+   even with an unchanged signature or failed compositor query. If both discovery
+   sources fail, retain an existing dock lease only for a non-extending 30-second
+   failure window. Unknown state cannot authorize automatic suspend.
+6. Skip layout work for an unchanged signature unless forced or restoration is
+   pending. Security transitions have already run.
 7. Emit `PendingDisplay` for each pending output.
-8. Determine docked state and choose the normal or closed-lid layout.
+8. Choose the normal or closed-lid layout while docked.
 9. Request DPMS on, then apply the display transaction.
-10. On a new dock or forced apply, run platform dock actions.
-11. On undock, restore platform actions and optionally lock and suspend.
+10. On a new dock, forced apply, or redock with pending restoration, run dock actions.
+11. On undock, restore platform actions; retain failures for the next evaluation.
 12. Write runtime state and emit `StateChanged`.
 
 Display transaction failures update `lastError`, persist runtime state, emit
@@ -136,8 +161,20 @@ The daemon does not depend on KScreen JSON types or Wayland protocol objects.
 ### Discovery
 
 `KScreen.Snapshot` runs `kscreen-doctor -j`, decodes its output, identifies
-internal panels, derives device IDs, attaches approval and labels from config,
-and normalizes advertised modes.
+internal panels, attaches approvals and labels, and normalizes modes. Physical
+DRM state overrides cached connection flags where connectors are unambiguous.
+EDID hashing is shared with `DRMSnapshot`; disconnected connectors cannot reuse
+cached EDID. Same-named connectors on multiple GPUs cannot borrow each other's
+approval. KScreen commands have a five-second timeout.
+
+The controller uses the optional `PhysicalSnapshot(context.Context,
+config.Config)` capability independently of compositor discovery. Failed
+KScreen queries therefore need not lose a newly docked inhibitor or retain one
+after disconnect.
+`ResolvePhysical` preserves an explicitly approved session `kde:`/`connector:`
+identity on an EDID-less physical output only through a unique connected
+connector match. It rechecks current rules, including when using cached session
+metadata, and never borrows a cached EDID for an unknown physical display.
 
 The command runner is an interface, allowing tests to inspect complete atomic
 transactions without changing the real display.
@@ -176,6 +213,13 @@ records only values Dockstar may need to restore:
 - Ethernet device connected by Dockstar.
 - Whether Dockstar disabled Wi-Fi.
 
+Successful restorations clear their baseline independently. Failed items retain
+their original baseline for retry, and `Controller` surfaces failures through
+`lastError` without committing a completed undock. A redock reapplies dock
+policy without replacing unresolved ownership. A vanished/already-disconnected
+owned Ethernet device needs no further disconnect; a query failure remains
+pending. Explicit audio/power restoration opt-out discards its baseline.
+
 Command paths are fixed and arguments are constructed from validated config or
 parsed command output. Each child command receives a 15-second context.
 
@@ -183,25 +227,48 @@ Lid, lock, and suspend operations use D-Bus instead of shell commands.
 
 ## Sleep inhibition
 
-`internal/inhibit` owns two lease implementations behind a coordinator:
+`internal/inhibit` owns one systemd-logind lease implementation behind a
+coordinator. It calls `org.freedesktop.login1.Manager.Inhibit` for
+`sleep:idle:handle-lid-switch` in `block` mode and keeps the returned Unix file
+descriptor open. `Ensure`
+validates the D-Bus owner and descriptor without replacing a healthy lease, so
+normal two-second evaluation and phase changes cannot create an unprotected
+gap. If logind restarts or the descriptor is lost, the next evaluation
+reacquires it. Acquisition also checks the system manager's `Version` property
+and requires systemd 257, where `block` inhibitors gained strict enforcement
+against same-user callers.
 
-- A native PowerDevil inhibitor on the session bus. It blocks automatic
-  `InterruptSession` policy while allowing an explicit Plasma Sleep action.
-- A logind `sleep` block inhibitor on the system bus. It bridges PowerDevil's
-  five-second policy-enforcement delay and remains as a degraded fallback when
-  PowerDevil cannot be reached.
+The daemon holds protection only for an approved dock, a 30-second bounded
+post-resume discovery window, a five-second closed-lid disconnect window, or a
+non-extending 30-second discovery-failure window after a known dock. All lease
+descriptors are released on disable, ordinary undock, daemon shutdown, or
+deliberate suspend. Lifecycle operations share one ordering mutex, preventing
+an evaluation from reacquiring a lease after a concurrent release.
 
-The coordinator verifies that Dockstar appears in PowerDevil's active
-inhibitions after a six-second warmup. If Plasma explicitly blocks Dockstar's
-inhibition, the coordinator releases the logind bridge and reports the
-protection unavailable instead of bypassing the user's decision. It retries an
-unavailable PowerDevil connection every five seconds and reacquires leases if
-either D-Bus owner restarts.
+`Controller.SuspendNow` is the one-shot bypass for a strict block inhibitor. It
+marks a generation-scoped request pending, preserves grace deadlines, releases the
+lease, confirms through `ListInhibitors` that logind observed the release, and
+asks logind to suspend with interactive authorization disabled. This prevents
+the daemon from overriding another application's inhibitor or opening an
+unattended Polkit prompt. An unconfirmed release or request failure restores
+protection directly from the last state and preserved grace deadlines, without
+requiring KScreen; a 15-second watchdog does the same if sleep never starts. The
+`PrepareForSleep(true)` signal records pre-sleep dock and lid state, and
+`PrepareForSleep(false)` closes the bypass and starts the resume guard when
+needed. The closed-lid undock automation uses this same path.
 
-The daemon holds protection only for an approved dock, a 20-second
-post-resume discovery window, or a five-second closed-lid disconnect window.
-All lease descriptors and D-Bus cookies are released on disable, ordinary
-undock, intentional suspend, cancellation, and daemon shutdown.
+Automatic closed-undock suspend has its own generation-scoped 500-millisecond
+delay. Lifecycle/config changes invalidate stale callbacks. The callback queries
+the compositor before fresh physical connectivity and lid state, cancels on
+unknown state, then reuses the intentional-suspend path without recursively
+acquiring the lifecycle mutex.
+
+The root boot guard watches local graphical sessions independently of policy
+updates. Each new login has a fixed 15-second handoff deadline. A Dockstar
+sleep-block inhibitor owned by a local graphical session's UID, excluding the
+guard itself, proves readiness; otherwise the deadline forces release. Handoff
+remains latched through overlapping graphical sessions to avoid reacquisition
+during deliberate suspend. A new login after logout gets a new bounded window.
 
 ## D-Bus layer
 
@@ -222,6 +289,7 @@ argument and return value.
 | `$XDG_RUNTIME_DIR/dockstar/state.json` | daemon | Latest runtime state snapshot |
 | `/etc/dockstar/wake.json` | root helper | Persistent desired wake state and managed IDs |
 | `/var/lib/dockstar/wake-baseline.json` | root helper | First-recorded source states for restore |
+| `/var/lib/dockstar/startup.json` | root startup helper | Explicit EDID enrollment and pre-login protection policy |
 
 Runtime state is a convenience mirror of `GetStatus`; D-Bus is the live source
 of truth.
@@ -232,9 +300,12 @@ The primary daemon, CLI, and UI run as the desktop user. Their effects are
 limited to the user's display session and commands already authorized for that
 user.
 
-The Polkit policy names only `/usr/bin/dockstar-wake-helper`. The helper rejects
-unknown operations and validates PCI IDs and state values before deriving
-paths. It never accepts an arbitrary path from an unprivileged caller.
+Polkit actions name only the fixed wake and startup helper executables. Both
+reject unknown operations and arbitrary caller-provided paths. The startup
+helper strictly validates bounded JSON input, persists only approved EDID IDs,
+and invokes only fixed service-management arguments. The boot guard is a
+separate root process constrained to read-only filesystems and system D-Bus;
+it neither reads home directories nor runs session display commands.
 
 See [Hardware Wake](wake.md#privilege-boundary) and
 [SECURITY.md](../SECURITY.md) for the operational boundary.
@@ -244,13 +315,16 @@ See [Hardware Wake](wake.md#privilege-boundary) and
 - Invalid config prevents daemon startup or reload; the existing in-memory
   config remains intact on a failed reload.
 - Failure to query KScreen updates `lastError` and leaves the current layout
-  untouched.
+  untouched, but physical discovery still reconciles sleep protection. If both
+  discovery sources fail, stale protection expires after a bounded grace.
 - Display apply failure skips platform dock actions.
-- Individual platform action failures are joined, logged as warnings, and do
-  not roll back a successful display layout.
-- Failure to query lid state is logged at debug level and treated as open.
-- Failure to acquire PowerDevil falls back to a scoped logind inhibitor and is
-  reported in `sleepProtection`; failure of both backends leaves protection
-  inactive without changing system policy.
+- Individual dock action failures are joined and logged without rolling back a
+  successful display layout. Undock restoration failures remain retryable and
+  are reported through `lastError`.
+- Failure to query lid state is logged and uses the open-lid layout, but unknown
+  lid state never authorizes automatic closed-undock suspend.
+- Failure to acquire the logind lease is reported in `sleepProtection` with
+  `backend: "none"`; protection remains inactive without changing system
+  policy.
 - A missing wake policy makes the post-resume helper fail harmlessly because
   the sleep hook ignores its exit status.

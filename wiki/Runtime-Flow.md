@@ -49,11 +49,12 @@ as approved; Apply forces the same transition immediately.
 
 ## Resume
 
-logind emits `PrepareForSleep(false)`. If hardware wake and user sleep
-protection are enabled, the daemon immediately acquires a resume guard. It
-checks after 250 ms, every 500 ms for five seconds, and then every second for a
-maximum of 20 seconds. An approved display turns the guard into docked
-protection; otherwise the guard expires.
+logind emits `PrepareForSleep(false)`. When user sleep protection is enabled,
+the daemon immediately acquires a resume guard if the machine was docked or
+lid-closed before sleep, or if hardware wake is enabled. It checks after 250
+ms, every 500 ms for five seconds, and then every second for a maximum of 30
+seconds. An approved display turns the guard into docked protection. An
+open-lid undocked result releases early; otherwise the guard expires.
 
 The system wake helper is earlier in the chain: firmware and a controller must
 wake the CPU before logind can emit the resume signal.
@@ -66,10 +67,20 @@ When a previously docked state has no approved external output:
 2. Disconnect Ethernet only if Dockstar connected it.
 3. Re-enable Wi-Fi only if Dockstar disabled it.
 4. If the lid is closed and lock is enabled, lock the session.
-5. If suspend is also enabled, request suspend after 500 ms.
+5. If suspend is also enabled, release protection and request one intentional
+   suspend after 500 ms.
 6. Release sleep protection, except for the five-second closed-lid disconnect
-   guard. Intentional Dockstar suspend releases immediately.
+   guard. If no Dockstar suspend is configured, desktop policy takes control
+   when the guard expires.
 7. Store and emit undocked state.
+
+## Intentional suspend
+
+The settings window, tray, and `dockstar suspend` call the daemon's
+`SuspendNow` method. It marks the request pending, releases the logind lease,
+and asks logind to suspend. A failed request reacquires protection immediately;
+a request that never begins has a 15-second watchdog. Resume clears the bypass
+and starts the normal bounded discovery guard when needed.
 
 ## Mirror path
 

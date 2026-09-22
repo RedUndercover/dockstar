@@ -18,8 +18,11 @@ automation continues when the UI is closed.
 - Use a separate closed-lid layout.
 - Prefer display audio, wired networking, and an AC power profile while docked,
   then restore the previous state on undock.
-- Prevent automatic lid and idle sleep while an approved dock is active,
-  without requiring users to change their Plasma power profile.
+- Block lid and idle sleep through logind while an approved dock is active,
+  without requiring users to change their Plasma power profile, and provide a
+  one-shot intentional suspend action.
+- Protect explicitly approved docks at the login screen with an opt-in system
+  service, without automatic login or access to a user's graphical session.
 - Lock and suspend after a closed-lid undock.
 - Optionally enable eligible PCI display, USB, and Thunderbolt controllers plus
   USB root hubs as hardware wake sources through a narrowly scoped Polkit helper.
@@ -30,6 +33,7 @@ automation continues when the UI is closed.
 
 - Linux amd64
 - KDE Plasma 6 on Wayland
+- systemd 257 or newer
 - KScreen and `kscreen-doctor`
 - PipeWire Pulse (`pactl`) for audio automation
 - NetworkManager (`nmcli`) for networking automation
@@ -54,10 +58,14 @@ Install the development build for the current user:
 make install-user
 ```
 
-The source installer starts `dockstar.service` but does not install or enable
-the privileged wake layer. Distribution packages include the Polkit policy and
-sleep hook; wake sources still remain untouched until explicitly enabled in
-Dockstar Settings or with `dockstar wake enable`.
+The source installer starts the user-session `dockstar.service` but does not
+install privileged components. Distribution packages include the startup and
+wake helpers. After approving displays, enable pre-login protection once with
+`dockstar startup enable` and administrator authentication. Use
+`dockstar startup sync` after changing approvals, including the final revocation.
+Settings → Displays shows session and boot approvals together and provides the
+same authenticated controls. Hardware wake remains a separate opt-in through
+Settings or `dockstar wake enable`.
 
 ## Commands
 
@@ -69,8 +77,10 @@ dockstar deny DEVICE_ID
 dockstar trust all|allowlist|off
 dockstar mode extend|mirror|external-only|internal-only
 dockstar apply
+dockstar suspend
 dockstar diagnose
 dockstar wake status|enable|disable|restore
+dockstar startup status|enable|sync|disable
 dockstar config show|validate [PATH]
 ```
 
@@ -85,6 +95,7 @@ not overwrite each other.
 - [User guide](docs/user-guide.md)
 - [CLI reference](docs/cli.md)
 - [Configuration reference](docs/configuration.md)
+- [Sleep protection](docs/sleep-protection.md)
 - [Hardware wake](docs/wake.md)
 - [Architecture](docs/architecture.md)
 - [D-Bus API](docs/dbus-api.md)

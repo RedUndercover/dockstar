@@ -5,10 +5,12 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"github.com/redundercover/dockstar/internal/config"
 	"github.com/redundercover/dockstar/internal/daemon"
 	"github.com/redundercover/dockstar/internal/ipc"
+	"github.com/redundercover/dockstar/internal/startup"
 	"github.com/redundercover/dockstar/internal/wake"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -36,13 +39,16 @@ type App struct {
 }
 
 type UIState struct {
-	Config      config.Config `json:"config"`
-	Revision    uint64        `json:"revision"`
-	Status      daemon.State  `json:"status"`
-	Wake        wake.Status   `json:"wake"`
-	WakeSupport WakeSupport   `json:"wakeSupport"`
-	WakeError   string        `json:"wakeError,omitempty"`
-	Startup     StartupStatus `json:"startup"`
+	Config      config.Config        `json:"config"`
+	Revision    uint64               `json:"revision"`
+	Status      daemon.State         `json:"status"`
+	Wake        wake.Status          `json:"wake"`
+	WakeSupport WakeSupport          `json:"wakeSupport"`
+	WakeError   string               `json:"wakeError,omitempty"`
+	Startup     StartupStatus        `json:"startup"`
+	Boot        BootProtectionStatus `json:"boot"`
+	BootSupport BootSupport          `json:"bootSupport"`
+	BootError   string               `json:"bootError,omitempty"`
 }
 
 type WakeSupport struct {
@@ -58,6 +64,19 @@ type StartupStatus struct {
 	Error          string `json:"error,omitempty"`
 }
 
+type BootProtectionStatus struct {
+	startup.Status
+	PendingAdditions []string `json:"pendingAdditions,omitempty"`
+	PendingRemovals  []string `json:"pendingRemovals,omitempty"`
+	PolicyMismatch   bool     `json:"policyMismatch"`
+	InSync           bool     `json:"inSync"`
+}
+
+type BootSupport struct {
+	Manageable bool     `json:"manageable"`
+	Missing    []string `json:"missing,omitempty"`
+}
+
 const trayAutostartName = "io.github.redundercover.Dockstar.Tray.desktop"
 
 var wakeSupportPaths = []struct {
@@ -71,6 +90,17 @@ var wakeSupportPaths = []struct {
 	{path: "/usr/bin/dockstar-wake-helper", label: "privileged wake helper", executable: true, required: true},
 	{path: "/usr/share/polkit-1/actions/io.github.redundercover.Dockstar.policy", label: "Polkit policy", required: true},
 	{path: "/usr/lib/systemd/system-sleep/50-dockstar", label: "resume hook", executable: true, persistent: true},
+}
+
+var bootSupportPaths = []struct {
+	paths      []string
+	label      string
+	executable bool
+}{
+	{paths: []string{"/usr/bin/pkexec"}, label: "Polkit authorization broker", executable: true},
+	{paths: []string{"/usr/bin/dockstar-startup-helper"}, label: "privileged startup helper", executable: true},
+	{paths: []string{"/usr/share/polkit-1/actions/io.github.redundercover.Dockstar.Startup.policy"}, label: "startup Polkit policy"},
+	{paths: []string{"/usr/lib/systemd/system/dockstar-startup.service", "/lib/systemd/system/dockstar-startup.service"}, label: "startup systemd unit"},
 }
 
 func main() {
@@ -139,12 +169,19 @@ func (a *App) GetState() (UIState, error) {
 		Revision:    revision,
 		WakeSupport: detectWakeSupport("/"),
 		Startup:     detectStartupStatus(),
+		BootSupport: detectBootSupport("/"),
 	}
 	if err := json.Unmarshal([]byte(rawConfig), &state.Config); err != nil {
 		return UIState{}, fmt.Errorf("decode configuration: %w", err)
 	}
 	if err := json.Unmarshal([]byte(rawStatus), &state.Status); err != nil {
 		return UIState{}, fmt.Errorf("decode display status: %w", err)
+	}
+	state.Boot = bootProtectionStatus(state.Config, startup.Status{})
+	if bootStatus, bootErr := startup.GetStatus(); bootErr != nil {
+		state.BootError = bootErr.Error()
+	} else {
+		state.Boot = bootProtectionStatus(state.Config, bootStatus)
 	}
 	if rawWake, wakeErr := client.JSONCall(ctx, "GetWakeStatus"); wakeErr != nil {
 		state.WakeError = wakeErr.Error()
@@ -178,6 +215,33 @@ func (a *App) Apply() (UIState, error) {
 		return UIState{}, err
 	}
 	return a.GetState()
+}
+
+func (a *App) SuspendNow() (bool, error) {
+	a.mu.RLock()
+	ctx := a.ctx
+	a.mu.RUnlock()
+	if ctx == nil {
+		return false, errors.New("Dockstar window is not ready")
+	}
+	choice, err := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
+		Type:          wailsruntime.QuestionDialog,
+		Title:         "Suspend computer",
+		Message:       "Dockstar will release sleep protection for this suspend and restore it after resume.",
+		Buttons:       []string{"Suspend", "Cancel"},
+		DefaultButton: "Cancel",
+		CancelButton:  "Cancel",
+	})
+	if err != nil {
+		return false, fmt.Errorf("confirm suspend: %w", err)
+	}
+	if choice != "Suspend" {
+		return false, nil
+	}
+	if err := a.callDaemon(25*time.Second, "SuspendNow"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (a *App) SetLayout(layout string) (UIState, error) {
@@ -218,6 +282,99 @@ func (a *App) SetStartupEnabled(enabled bool) (UIState, error) {
 		return UIState{}, err
 	}
 	return a.GetState()
+}
+
+func (a *App) BootAction(action string) (UIState, error) {
+	if action != "enable" && action != "sync" && action != "disable" {
+		return UIState{}, fmt.Errorf("unsupported pre-login protection action %q", action)
+	}
+	if support := detectBootSupport("/"); !support.Manageable {
+		return UIState{}, fmt.Errorf("pre-login sleep protection support is incomplete; install the Dockstar system package (missing: %s)", strings.Join(support.Missing, ", "))
+	}
+
+	latest, err := a.GetState()
+	if err != nil {
+		return UIState{}, fmt.Errorf("load latest saved configuration: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	switch action {
+	case "enable":
+		err = startup.Setup(ctx, latest.Config, true)
+	case "sync":
+		err = startup.Sync(ctx, latest.Config)
+	case "disable":
+		err = startup.Setup(ctx, config.Config{}, false)
+	}
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return UIState{}, errors.New("administrator authentication timed out after two minutes")
+		}
+		return UIState{}, fmt.Errorf("administrator authorization was cancelled or the privileged startup helper failed: %w", err)
+	}
+	return a.GetState()
+}
+
+func bootProtectionStatus(cfg config.Config, current startup.Status) BootProtectionStatus {
+	desired := startup.DesiredStatus(cfg)
+	expected := append([]string(nil), desired.AllowedEDIDs...)
+	currentEDIDs := append([]string(nil), current.AllowedEDIDs...)
+	sort.Strings(expected)
+	sort.Strings(currentEDIDs)
+
+	expectedSet := make(map[string]struct{}, len(expected))
+	for _, id := range expected {
+		expectedSet[id] = struct{}{}
+	}
+	currentSet := make(map[string]struct{}, len(currentEDIDs))
+	for _, id := range currentEDIDs {
+		currentSet[id] = struct{}{}
+	}
+
+	pendingAdditions := make([]string, 0)
+	for _, id := range expected {
+		if _, ok := currentSet[id]; !ok {
+			pendingAdditions = append(pendingAdditions, id)
+		}
+	}
+	pendingRemovals := make([]string, 0)
+	for _, id := range currentEDIDs {
+		if _, ok := expectedSet[id]; !ok {
+			pendingRemovals = append(pendingRemovals, id)
+		}
+	}
+
+	policyMismatch := current.Enabled != desired.Enabled
+	if current.Installed && (current.Detection != desired.Detection || current.KeepAwakeWhileDocked != desired.KeepAwakeWhileDocked) {
+		policyMismatch = true
+	}
+	return BootProtectionStatus{
+		Status:           current,
+		PendingAdditions: pendingAdditions,
+		PendingRemovals:  pendingRemovals,
+		PolicyMismatch:   policyMismatch,
+		InSync:           !policyMismatch && len(pendingAdditions) == 0 && len(pendingRemovals) == 0,
+	}
+}
+
+func detectBootSupport(root string) BootSupport {
+	support := BootSupport{}
+	for _, component := range bootSupportPaths {
+		found := false
+		for _, candidate := range component.paths {
+			info, err := os.Stat(filepath.Join(root, filepath.Clean(candidate)))
+			if err != nil || info.IsDir() || component.executable && info.Mode()&0o111 == 0 {
+				continue
+			}
+			found = true
+			break
+		}
+		if !found {
+			support.Missing = append(support.Missing, component.label)
+		}
+	}
+	support.Manageable = len(support.Missing) == 0
+	return support
 }
 
 func detectStartupStatus() StartupStatus {

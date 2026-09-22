@@ -8,13 +8,16 @@
 | `cmd/dockstar-ui` | Wails adapter, tray process, and embedded frontend |
 | `cmd/dockstar-ui/frontend` | Vanilla JavaScript, CSS, Lucide icons, and Vite build |
 | `cmd/dockstar-wake-helper` | Root helper entry point |
+| `cmd/dockstar-startup-helper` | Authenticated boot-policy helper entry point |
 | `internal/config` | Schema, validation, revisioning, and atomic storage |
 | `internal/daemon` | Evaluation loop and dock state machine |
-| `internal/display` | Backend contract, KScreen adapter, layout planning, Wayland mirror |
+| `internal/display` | Physical DRM discovery, KScreen adapter, layout planning, Wayland mirror |
+| `internal/inhibit` | Persistent logind sleep lease and release acknowledgement |
 | `internal/ipc` | D-Bus server, client, introspection, signals, and error mapping |
 | `internal/platform` | Audio, network, power, lid, lock, and suspend integration |
 | `internal/protocol` | Generated Wayland client bindings |
 | `internal/wake` | Controller discovery, policy, baseline, Polkit invocation, and sysfs writes |
+| `internal/startup` | Pre-login guard, EDID enrollment, policy persistence, and session handoff |
 | `protocols` | Pinned Wayland and KDE XML inputs |
 | `packaging` | systemd, D-Bus, desktop, Polkit, icons, and install scripts |
 | `.github/workflows` | CI and tagged release automation |
@@ -106,6 +109,22 @@ transactions, and mirror common-mode selection without changing real outputs.
 and verifies discovery, baseline recording, enable, restore, and action
 rejection. Passing a non-root filesystem root makes privileged behavior
 testable without root.
+
+### Sleep-protection tests
+
+`internal/inhibit/inhibit_test.go` verifies lease persistence, reacquisition,
+failure reporting, and cleanup with fakes. The daemon tests cover dock, resume,
+disconnect, intentional-suspend, request-failure, release-failure, and watchdog
+state transitions.
+
+An opt-in test acquires a real inhibitor from the current system bus, confirms
+that logind reports suspend inhibited, verifies the lease survives beyond the
+removed promotion window, and checks cleanup. It does not request suspend:
+
+```sh
+DOCKSTAR_INHIBIT_INTEGRATION=1 \
+  go test ./internal/inhibit -run TestRealCoordinatorIntegration -count=1 -v
+```
 
 ### Race and static analysis
 

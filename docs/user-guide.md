@@ -22,6 +22,7 @@ The tray refreshes status every five seconds. Its menu provides:
 | Open Dockstar | Shows and focuses the settings window |
 | Apply current profile | Forces an evaluation and reapplies the active profile |
 | Layout | Saves and applies extend, mirror, external-only, or internal-only |
+| Suspend now | Confirms and releases Dockstar protection for one suspend cycle |
 | Quit | Exits the tray and settings process, but not the daemon |
 
 KDE starts the tray from
@@ -35,9 +36,9 @@ The settings window has five views:
 | View | Contents |
 | --- | --- |
 | Overview | Dock state, graphical topology, primary output, sleep protection, backend, update time, and quick layout application |
-| Displays | Connected outputs, approval, mode, scale, position, primary priority, and EDID identity |
+| Displays | Connected and saved displays, session and boot approvals, authenticated boot sync, mode, scale, position, primary priority, and identity |
 | Automation | Detection, layouts, system policies, restore behavior, closed-lid safety, and an outcome preview |
-| Wake & power | Hardware-wake toggle, sleep-protection status, packaged-support status, controller states, and baseline restore |
+| Wake & power | Hardware-wake toggle, sleep-protection status, intentional suspend, packaged-support status, controller states, and baseline restore |
 | Diagnostics | The structured `dockstar diagnose` report, with refresh and copy actions |
 
 The **Start Dockstar automatically** toggle under **Automation** controls both
@@ -128,6 +129,11 @@ layout is `external-only`.
 If the machine becomes undocked while the lid is closed, Dockstar can lock the
 session and request suspend 500 milliseconds later. Suspend is conditional on
 lock being enabled as well as suspend being enabled.
+Re-docking, opening the lid, changing configuration, manual suspend,
+sleep/resume, or exiting the daemon cancels the pending request. At execution,
+current connectivity and lid state must still confirm a closed undocked laptop;
+unknown state cancels it. Lock/suspend transitions do not require a successful
+display layout transaction.
 
 ## Dock actions
 
@@ -157,26 +163,42 @@ the saved profile on undock when `restore` is true.
 
 **Keep computer awake while docked** is enabled by default. It prevents
 automatic idle and lid sleep only after an approved external display creates
-the Dockstar docked state. Plasma's native inhibitor is preferred, which means
-choosing **Sleep** explicitly still works. Dockstar uses logind temporarily
-while PowerDevil activates the inhibitor and as a compatibility fallback if
-PowerDevil is unavailable.
+the Dockstar docked state. Dockstar holds a persistent logind block for
+`sleep:idle:handle-lid-switch`, covering PowerDevil sleep requests, logind idle
+actions, and direct logind lid handling. This also blocks an
+ordinary Plasma **Sleep** request while protected. Use Dockstar's **Suspend
+now** action in the window or tray, or `dockstar suspend`, for a deliberate
+one-cycle release.
 
 The protection status appears on **Overview** and **Wake & power**:
 
 | Status | Meaning |
 | --- | --- |
 | Ready | Enabled, with no approved dock currently active |
-| Active | PowerDevil is protecting the docked session |
-| Starting | The temporary logind bridge is covering PowerDevil warmup |
+| Protected | logind is blocking sleep for the docked session |
 | Resume guard | Dockstar is waiting for display discovery after hardware wake |
 | Disconnect guard | A short closed-lid disconnect window is active |
-| Compatibility mode | logind is protecting the session because PowerDevil is unavailable |
-| Unavailable | Neither backend is active, or Plasma blocked the inhibition |
+| Suspending | Protection is released for one Dockstar suspend request |
+| Unavailable | logind protection could not be acquired |
 
-Compatibility mode can block an explicit Sleep request because logind cannot
-distinguish it from automatic sleep. The GUI shows this condition rather than
-silently changing desktop settings.
+The daemon never changes the saved desktop power policy. After the five-second
+closed-lid disconnect guard, that policy takes control again unless Dockstar's
+explicit closed-lid suspend automation is enabled. The complete state and
+verification commands are documented in [Sleep Protection](sleep-protection.md).
+
+For protection at the login screen, install the system package and use **Enable**
+under **Displays → Pre-login sleep protection**, or run `dockstar startup enable`
+after explicitly approving EDID devices. This administrator-authorized boot
+allowlist is separate from session approvals and hardware wake.
+
+**Known displays** includes disconnected saved devices and entries retained only
+by the boot policy. Each row shows both approval states. Session changes save
+without elevation; **Sync saved approvals** (or `dockstar startup sync`) applies
+the displayed differences with administrator authentication. **Revoke and sync**
+also removes boot-only devices. Revoking the final approved EDID and syncing
+disables pre-login protection. Authentication failure does not claim a successful
+boot update. **Disable** or `dockstar startup disable` turns it off directly.
+The normal Startup switch controls session startup only.
 
 ## Restore lifetime
 
@@ -185,16 +207,24 @@ restart while docked loses the original pre-dock values and may establish a new
 baseline from the already-docked state. Apply configuration changes before
 docking when exact restoration matters.
 
+Failed undock restoration remains pending and retries on subsequent evaluations,
+even without a new hotplug event. Successful items are not repeated. Check
+`lastError` in status for pending failures. Re-docking preserves unresolved
+baselines and reapplies dock policy. Explicitly setting audio or power
+`restore: false` discards that saved baseline on undock instead of retrying it;
+later opt-in captures a fresh baseline.
+
 ## Timing
 
 - Display state is evaluated every two seconds.
-- Identical connected-device, approval, and lid signatures are skipped.
-- Resume from logind starts protection immediately when hardware wake is
-  enabled, then polls after 250 milliseconds, every 500 milliseconds for the
-  first five seconds, and every second for up to 20 seconds.
-- PowerDevil activation is verified after six seconds; logind covers that
-  warmup and is normally released afterward.
-- Closed-lid undock protection lasts up to five seconds unless Dockstar is
-  intentionally suspending.
+- Unchanged signatures skip layout work, but not safety checks or pending restoration.
+- Resume from logind starts protection when the pre-sleep state was docked or
+  lid-closed, or when hardware wake is enabled. It polls after 250
+  milliseconds, every 500 milliseconds for the first five seconds, and every
+  second for up to 30 seconds. An open-lid undocked result releases early.
+- Closed-lid undock protection lasts up to five seconds. An enabled Dockstar
+  closed-lid suspend uses the intentional-suspend path after 500 milliseconds.
+- An intentional suspend request that does not begin restores protection after
+  a 15-second watchdog.
 - Platform commands have a 15-second timeout.
 - Normal CLI operations have a 30-second context timeout.

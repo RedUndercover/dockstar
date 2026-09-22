@@ -30,15 +30,17 @@ busctl --user introspect \
 | `UpdateConfig` | `s configJSON`, `t expectedRevision` | `t revision` | Validates and atomically replaces config |
 | `Apply` | none | none | Forces evaluation and active profile application |
 | `SetLayout` | `s layout` | none | Saves `defaultLayout` and forces evaluation |
+| `SuspendNow` | none | none | Releases Dockstar protection for one logind suspend request |
 | `ApproveDisplay` | `s id`, `b allowed` | none | Creates or updates a display rule |
 | `SetTrustPolicy` | `s policy` | none | Saves `allowlist`, `all`, or `off` |
 | `Reload` | none | none | Reloads and validates config from disk |
 | `GetWakeStatus` | none | `s statusJSON` | Returns policy and live controller state |
 | `Diagnose` | none | `s diagnosticsJSON` | Returns combined status and environment diagnostics |
 
-`Apply`, `SetLayout`, `UpdateConfig`, and convenience mutations can block while
-configuration or display operations complete. Clients should use a reasonable
-timeout; the bundled CLI uses 30 seconds.
+`Apply`, `SetLayout`, `SuspendNow`, `UpdateConfig`, and convenience mutations
+can block while configuration, display, or logind operations complete. Clients
+should use a reasonable timeout; the bundled CLI uses 30 seconds and the
+server bounds `SuspendNow` to 20 seconds.
 
 ## JSON payloads
 
@@ -58,10 +60,13 @@ timeout; the bundled CLI uses 30 seconds.
 | `sleepProtection` | object | Current automatic-sleep protection state and backend |
 | `updated` | RFC 3339 timestamp | Time the state record was built |
 
-`sleepProtection` contains `enabled`, `active`, `phase`, `backend`,
-`degraded`, and optional `lastError`. Phases are `inactive`, `docked`,
-`resume-grace`, or `undock-grace`. Backends are `none`, `powerdevil`, or
-`logind`; `logind` with `degraded: true` is compatibility fallback mode.
+`sleepProtection` contains `enabled`, `active`, `phase`, `backend`, `mode`,
+`acquiredAt`, `degraded`, and optional `lastError`. Phases are `inactive`,
+`docked`, `resume-grace`, `undock-grace`, `snapshot-grace`, or `manual-suspend`. Backends are
+`none` or `logind`; an active lease uses `mode: "block"`. `acquiredAt` is an
+RFC 3339 timestamp and remains stable while the same lease is held. `degraded`
+is retained for payload compatibility and is true when requested protection
+could not be acquired.
 
 ### Configuration
 
@@ -80,6 +85,7 @@ schema and advances the store's current revision after matching
 - `waylandDisplay`
 - `desktop`
 - `status` or `statusError`
+- `sleepControl`, containing `intentionalSuspendPending` and `sleepStarted`
 - `wake` or `wakeError`
 
 ## Signals
@@ -146,6 +152,15 @@ busctl --user call \
   /io/github/redundercover/Dockstar \
   io.github.redundercover.Dockstar1 SetLayout \
   s mirror
+```
+
+Request one intentional suspend:
+
+```sh
+busctl --user call \
+  io.github.redundercover.Dockstar \
+  /io/github/redundercover/Dockstar \
+  io.github.redundercover.Dockstar1 SuspendNow
 ```
 
 Reload a hand-edited config:

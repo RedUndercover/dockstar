@@ -11,9 +11,9 @@ and coordinates optional audio, network, power, lock, and suspend actions.
 The daemon exposes a versioned session D-Bus API used by the CLI, tray, and
 settings window.
 .PP
-Version 1 supports Linux amd64 running KDE Plasma 6 on Wayland. A fresh
-configuration uses an empty display allowlist and does not change privileged
-hardware wake state.
+Version 1 supports Linux amd64 running KDE Plasma 6 on Wayland with systemd
+257 or newer. A fresh configuration uses an empty display allowlist and does
+not change privileged hardware wake state.
 .SH COMMANDS
 .TP
 .B daemon
@@ -41,6 +41,10 @@ Save the default layout and immediately force evaluation.
 Force display evaluation and rerun active dock actions after a successful
 layout transaction.
 .TP
+.B suspend
+Temporarily release Dockstar sleep protection and request one intentional
+suspend through systemd-logind. Protection is restored after resume.
+.TP
 .B diagnose
 Print state, environment, backend, config path, and wake diagnostics as JSON.
 .TP
@@ -48,6 +52,14 @@ Print state, environment, backend, config path, and wake diagnostics as JSON.
 Inspect or configure hardware wake sources. Changes require an installed
 system helper and Polkit authentication. Restore returns sources to their
 first-recorded baseline.
+.TP
+.BI startup " status|enable|sync|disable"
+Inspect or configure approved-device sleep protection before graphical login.
+Enable requires administrator authentication and snapshots explicitly approved
+EDID displays into a root-owned system policy. Sync updates that policy after
+approval changes, including the final revocation, which disables protection.
+The system service hands over when session protection is ready or after a
+fixed 15-second login timeout; it does not configure layouts or automatic login.
 .TP
 .B config show
 Load, validate, and print the active configuration.
@@ -103,13 +115,25 @@ Root-owned desired hardware wake policy.
 .TP
 .I /var/lib/dockstar/wake-baseline.json
 First-recorded hardware wake states used by restore.
+.TP
+.I /var/lib/dockstar/startup.json
+Root-owned pre-login protection policy and explicitly approved EDID identities.
 .SH EXIT STATUS
 Zero indicates success. Invalid arguments, unavailable D-Bus services,
 configuration errors, rejected display transactions, failed commands, or wake
 helper failures return nonzero.
+.SH SLEEP PROTECTION
+When Keep computer awake while docked is enabled, Dockstar holds a strict
+systemd-logind sleep inhibitor for an approved dock. Ordinary Plasma Sleep may
+therefore be blocked. Use
+.B dockstar suspend
+or the equivalent settings or tray action to release protection for one
+intentional suspend cycle. Dockstar does not rewrite Plasma power settings or
+logind configuration.
 .SH SECURITY
-Only dockstar-wake-helper is intended to run with administrator privileges.
-The daemon, CLI, tray, and settings window run as the desktop user.
+The wake helper, startup helper, and hardened startup guard run with
+administrator privileges. The session daemon, ordinary CLI commands, tray,
+and settings window run as the desktop user.
 .SH SEE ALSO
 .BR systemd.service (5),
 .BR systemd-sleep (8),

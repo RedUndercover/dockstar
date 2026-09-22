@@ -33,6 +33,9 @@ func TestSnapshotUsesEDIDIdentity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "edid"), make([]byte, 128), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "status"), []byte("connected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	runner := &fakeRunner{json: testDocument()}
 	backend := &KScreen{Runner: runner, Doctor: "kscreen-doctor", DRMRoot: drm}
 	snapshot, err := backend.Snapshot(context.Background(), config.Default())

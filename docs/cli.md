@@ -2,8 +2,8 @@
 
 The `dockstar` command is both the daemon entry point and the administrative
 CLI. Commands that query or change desktop state call the running daemon over
-the session bus. Configuration inspection and hardware wake commands can run
-without the daemon.
+the session bus. Configuration inspection, hardware wake, and startup commands
+can run without the daemon.
 
 All structured output is pretty-printed JSON. Errors are written to standard
 error with the `dockstar:` prefix and produce a nonzero exit status.
@@ -86,6 +86,17 @@ fails, for example because no approved external display is present.
 Forces evaluation even when the connected-device signature did not change. A
 successful forced apply also reruns dock actions.
 
+### `dockstar suspend`
+
+Requests one intentional suspend through the running daemon. Dockstar releases
+its strict logind sleep inhibitor, asks logind to suspend, and restores the
+appropriate protection after resume. A failed request restores protection
+immediately; a request that never begins sleeping is covered by a 15-second
+watchdog.
+
+The CLI does not ask for confirmation. Dockstar Settings and the tray expose
+the same action with a confirmation dialog.
+
 ## Configuration
 
 ### `dockstar config show`
@@ -107,6 +118,46 @@ dockstar config validate ./example-config.json
 
 Editing the file does not update an already running daemon until it is
 restarted or its D-Bus `Reload` method is called.
+
+## Pre-login protection
+
+### `dockstar startup enable`
+
+Authenticates with Polkit, snapshots explicitly approved EDID displays from
+the current config into `/var/lib/dockstar/startup.json`, and enables and starts
+`dockstar-startup.service`. Requires the system package, detection enabled,
+keep-awake enabled, and at least one explicit EDID approval. Trust-all never
+enrolls unapproved displays.
+
+The service protects approved connected docks before login. At graphical login,
+including a locked session, it hands over when a Dockstar sleep-block lease is
+visible for a local graphical session's UID, or after a fixed 15-second timeout.
+It does not reacquire during that login after handing over. Keep the normal user
+daemon enabled for session automation. The boot guard does not change layouts,
+audio, networking, or hardware wake.
+
+### `dockstar startup sync`
+
+Authenticates with Polkit and replaces the entire boot allowlist from the saved
+session config. Use after additions, revocations, or detection/keep-awake changes.
+Unlike `enable`, this accepts a final revocation: no explicit EDID approvals,
+disabled detection, or disabled keep-awake writes a disabled boot policy.
+Settings → Displays provides the same **Sync saved approvals** action and shows
+pending additions/removals. Ordinary session approval changes never elevate
+automatically.
+
+### `dockstar startup status`
+
+Prints the saved system policy, including `installed` (whether a policy exists),
+`enabled`, and `allowedEdids`. This is not a live inhibitor or service-health
+report; use `systemctl status dockstar-startup.service` and `systemd-inhibit
+--list` for those. No administrator authentication is required.
+
+### `dockstar startup disable`
+
+Authenticates with Polkit and replaces the boot policy with a disabled policy.
+The running guard releases its lease on the next poll. The user-session
+configuration and hardware wake policy are unchanged.
 
 ## Hardware wake
 

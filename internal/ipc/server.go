@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/redundercover/dockstar/internal/config"
@@ -20,6 +21,7 @@ type Handler interface {
 	ConfigJSON() (string, uint64, error)
 	UpdateConfig(string, uint64) (uint64, error)
 	SetLayout(context.Context, string) error
+	SuspendNow(context.Context) error
 	ApproveDisplay(string, bool) error
 	SetTrustPolicy(string) error
 	Reload() error
@@ -84,6 +86,12 @@ func (s *Server) SetLayout(layout string) *dbus.Error {
 	return dbusError(s.handler.SetLayout(context.Background(), layout))
 }
 
+func (s *Server) SuspendNow() *dbus.Error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return dbusError(s.handler.SuspendNow(ctx))
+}
+
 func (s *Server) ApproveDisplay(id string, allowed bool) *dbus.Error {
 	return dbusError(s.handler.ApproveDisplay(id, allowed))
 }
@@ -145,6 +153,7 @@ const introspectionXML = `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Objec
     <method name="UpdateConfig"><arg direction="in" type="s" name="configJSON"/><arg direction="in" type="t" name="expectedRevision"/><arg direction="out" type="t" name="revision"/></method>
     <method name="Apply"/>
     <method name="SetLayout"><arg direction="in" type="s" name="layout"/></method>
+    <method name="SuspendNow"/>
     <method name="ApproveDisplay"><arg direction="in" type="s" name="id"/><arg direction="in" type="b" name="allowed"/></method>
     <method name="SetTrustPolicy"><arg direction="in" type="s" name="policy"/></method>
     <method name="Reload"/>

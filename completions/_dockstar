@@ -1,2 +1,2 @@
 #compdef dockstar
-_arguments '1:command:(status devices allow deny trust mode apply diagnose wake config completion version)'
+_arguments '1:command:(status devices allow deny trust mode apply suspend diagnose wake startup config completion version)'

@@ -22,6 +22,7 @@ Dockstar version 1 requires:
 
 - Linux amd64.
 - KDE Plasma 6 running a Wayland session.
+- systemd 257 or later for strict same-user sleep inhibition.
 - KScreen and `/usr/bin/kscreen-doctor`.
 - A user D-Bus session and systemd user manager.
 
@@ -37,9 +38,9 @@ The following tools are required only when their automation policy is active:
 ## Install from a package
 
 Release builds provide Arch, Debian, and RPM packages. Package installation
-adds the daemon, UI, root wake helper, user and system service files, D-Bus
-activation, Polkit policy, desktop entries, icon, completions, manual page, and
-documentation.
+adds the daemon, UI, root helpers, user and system service files, D-Bus
+activation, Polkit policies, desktop entries, icon, completions, manual page,
+and documentation.
 
 Examples:
 
@@ -49,8 +50,16 @@ sudo apt install ./dockstar_VERSION_linux_amd64.deb
 sudo rpm -U dockstar_VERSION_linux_amd64.rpm
 ```
 
-Package installation makes the user service available globally. Hardware wake
-remains disabled until a user explicitly enables it.
+Package installation makes the user service available globally and starts an
+inert pre-login guard. Hardware wake and approved-device boot enrollment remain
+disabled until explicitly enabled.
+
+After upgrading an already running package, restart the user daemon so it uses
+the new executable and sleep-protection implementation:
+
+```sh
+systemctl --user restart dockstar.service
+```
 
 ## Install from source
 
@@ -68,8 +77,8 @@ make install-user
 The source installer places files under `~/.local`, installs and starts
 `dockstar.service`, and adds the tray to KDE autostart. Startup can then be
 changed from the Automation page in Dockstar Settings. It does not install the
-Polkit policy, system sleep hook, or root helper. Use a system package when
-hardware wake setup is required.
+Polkit policies, system services, or root helpers. Use a system package for
+hardware wake or pre-login protection.
 
 ## Verify the installation
 
@@ -83,6 +92,11 @@ dockstar devices
 `dockstar status` should report the `KScreen/Plasma Wayland` backend and at
 least the internal panel. An undocked system normally has an empty `layout` and
 `primary` value because no Dockstar layout is active.
+
+When an approved dock is active and **Keep computer awake while docked** is
+enabled, `.sleepProtection.backend` should be `logind`. See
+[Sleep Protection](sleep-protection.md) for verification and deliberate
+suspend behavior.
 
 ## Approve the first external display
 
@@ -102,6 +116,28 @@ dockstar apply
 
 The quotes are optional for current identifiers but help scripts treat the
 identifier as one argument.
+
+## Protect approved docks before login
+
+With the system package installed and displays already approved:
+
+```sh
+systemctl --user enable --now dockstar.service
+dockstar startup enable
+dockstar startup status
+```
+
+Authenticate as an administrator when prompted. The boot service uses a
+separate snapshot of explicitly approved EDID fingerprints and does not need an
+unlocked home directory or a user session. Use `dockstar startup sync` after
+approval changes, including the final revocation, or `dockstar startup disable`
+to remove pre-login protection. Settings → Displays shows pending differences
+and provides the same authenticated controls. Display layout automation still
+belongs to the logged-in Plasma session; this does not enable auto-login or
+configure SDDM.
+
+See [Sleep Protection](sleep-protection.md#before-login) for the handoff and
+diagnostics.
 
 ## Choose a trust policy
 

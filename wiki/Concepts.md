@@ -62,10 +62,12 @@ allowlist because the computer must wake before EDID can be read.
 
 Sleep protection is unprivileged, temporary daemon state. It prevents
 automatic sleep while an approved dock is active, during post-resume discovery,
-and briefly during a closed-lid disconnect. PowerDevil is the native backend;
-logind is the startup bridge and compatibility fallback. It is independent of
-the root-owned hardware wake policy and never rewrites the desktop's saved
-power settings.
+and briefly during a closed-lid disconnect. One persistent logind `sleep`
+block lease is the authoritative backend. Because that lease also blocks an
+ordinary Plasma Sleep action, Dockstar provides a generation-scoped
+`SuspendNow` path that releases it for one suspend cycle. Sleep protection is
+independent of the root-owned hardware wake policy and never rewrites the
+desktop's saved power settings.
 
 ## Restore baseline
 

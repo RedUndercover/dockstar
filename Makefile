@@ -21,6 +21,7 @@ build: build-ui-frontend
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o build/dockstar ./cmd/dockstar
 	$(GO) build -trimpath -tags '$(WAILS_TAGS)' -ldflags '$(LDFLAGS)' -o build/dockstar-ui ./cmd/dockstar-ui
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o build/dockstar-wake-helper ./cmd/dockstar-wake-helper
+	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o build/dockstar-startup-helper ./cmd/dockstar-startup-helper
 
 generate:
 	$(GO) generate ./internal/protocol

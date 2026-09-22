@@ -2,11 +2,12 @@
 
 ## Outputs
 
-Dockstar releases target Linux amd64 and contain three binaries:
+Dockstar releases target Linux amd64 and contain four binaries:
 
 - `dockstar`
 - `dockstar-ui`
 - `dockstar-wake-helper`
+- `dockstar-startup-helper`
 
 GoReleaser produces:
 
@@ -16,6 +17,9 @@ GoReleaser produces:
 - RPM package.
 - SHA-256 checksum manifest.
 - Syft JSON SBOM for each archive and package.
+
+Native packages require systemd 257 or newer because Dockstar relies on its
+strict same-user `block` inhibitor semantics.
 
 ## Pre-release checklist
 
@@ -76,13 +80,26 @@ requires a GitHub remote at `redundercover/dockstar` and a workflow-provided
 
 ## Package installation behavior
 
-The package script makes `dockstar.service` globally enabled for user managers.
-It does not enable `dockstar-wakeup.service` and does not create
-`/etc/dockstar/wake.json`. Hardware wake therefore remains opt-in after package
-installation.
+The package script leaves `dockstar.service` globally disabled so each user can
+control it with **Start Dockstar automatically**. The KDE-only system autostart
+entry makes the tray available; the toggle writes a per-user tray override and
+changes the user-service enable state together. Opening the tray, settings, or
+CLI may still D-Bus activate the daemon on demand.
 
-The autostart desktop entry starts the tray only in KDE. The daemon is still
-usable without the tray through D-Bus and CLI.
+The package enables `dockstar-wakeup.service`, but the unit runs only when
+`/etc/dockstar/wake.json` exists. Package installation does not create that
+policy, so hardware wake remains opt-in. On upgrades, starting the one-shot
+service immediately reapplies an existing policy and repairs installations
+where the service was previously left disabled.
+
+The package also enables `dockstar-startup.service`. It needs a root-owned
+`/var/lib/dockstar/startup.json` policy created through authenticated enrollment;
+installation alone never approves displays. Use Settings → Displays or
+`dockstar startup enable`, then `dockstar startup sync` after approval changes.
+
+Actual package removal disables the boot service without deleting the saved
+wake policy or baseline. Upgrade removal phases leave it enabled, and
+source-only user installs do not install or manage the system service.
 
 ## Dependency updates
 

@@ -36,6 +36,7 @@ func (t *trayController) ready() {
 	mirrorItem := layouts.AddSubMenuItem("Mirror", "Mirror both displays")
 	externalItem := layouts.AddSubMenuItem("External only", "Use only the external display")
 	internalItem := layouts.AddSubMenuItem("Internal only", "Use only the laptop display")
+	suspendItem := systray.AddMenuItem("Suspend now", "Release Dockstar protection for one suspend")
 	systray.AddSeparator()
 	quitItem := systray.AddMenuItem("Quit", "Quit Dockstar")
 
@@ -45,6 +46,7 @@ func (t *trayController) ready() {
 	go t.handle(mirrorItem.ClickedCh, func() { t.run("SetLayout", "mirror") })
 	go t.handle(externalItem.ClickedCh, func() { t.run("SetLayout", "external-only") })
 	go t.handle(internalItem.ClickedCh, func() { t.run("SetLayout", "internal-only") })
+	go t.handle(suspendItem.ClickedCh, t.suspendNow)
 	go t.handle(quitItem.ClickedCh, t.app.quit)
 	go func() {
 		for range systray.TrayOpenedCh {
@@ -59,6 +61,18 @@ func (t *trayController) ready() {
 		}
 	}()
 	t.refreshStatus()
+}
+
+func (t *trayController) suspendNow() {
+	confirmed, err := t.app.SuspendNow()
+	if err != nil {
+		log.Printf("Dockstar tray: suspend: %v", err)
+		systray.SetTooltip("Dockstar · Suspend failed")
+		return
+	}
+	if confirmed {
+		t.refreshStatus()
+	}
 }
 
 func (t *trayController) handle(clicks <-chan struct{}, action func()) {

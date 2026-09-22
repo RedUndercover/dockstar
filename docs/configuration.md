@@ -100,6 +100,8 @@ less than 1 Hz. Dockstar sorts candidates by pixel area and then refresh rate.
 
 `policy` is `prefer-display` or `unchanged`. `restore` controls whether the
 pre-dock default sink is restored on undock.
+Failed restoration is retained for retry; `restore: false` explicitly discards
+the saved baseline on undock, so re-enabling it later starts a fresh baseline.
 
 The display sink search is case-insensitive and matches `hdmi` or
 `displayport` in the Pulse sink name or description. It selects the first
@@ -118,29 +120,35 @@ matching sink reported by `pactl`.
 `onAcProfile` accepts `performance`, `balanced`, `power-saver`, or `unchanged`.
 Profiles are changed only when a power supply of type `Mains` reports online.
 `restore` controls whether the pre-dock profile is restored on undock.
+Failures are retried on later undocked evaluations. `restore: false` discards
+the saved baseline on undock rather than retaining a deferred restoration.
 
 `keepAwakeWhileDocked` defaults to `true`. While an approved external display
-keeps Dockstar in the docked state, the daemon prevents automatic idle and lid
-sleep. On Plasma it uses PowerDevil's native session inhibition, so an explicit
-**Sleep** command remains available. A short logind inhibitor covers
-PowerDevil's startup delay and acts as a compatibility fallback when PowerDevil
-is unavailable. Dockstar never rewrites Plasma power settings,
-`logind.conf`, or PAM configuration.
+keeps Dockstar in the docked state, the daemon holds one persistent logind
+`sleep:idle:handle-lid-switch` block inhibitor. This blocks lid, idle, and
+ordinary explicit Plasma sleep requests for as long as the protected dock session
+exists. Use **Suspend
+now** in Dockstar Settings or the tray, or run `dockstar suspend`, to release
+the lease for one intentional suspend cycle. Dockstar never rewrites Plasma
+power settings, `logind.conf`, or PAM configuration.
 
 Protection is released on normal undock, when detection is turned off, when
 this field is disabled, and when the daemon exits. A five-second closed-lid
-undock guard absorbs display disconnect churn. An intentional Dockstar
-closed-lid suspend releases protection before requesting suspend.
+undock guard absorbs display disconnect churn, then hands control back to the
+desktop policy. An intentional Dockstar suspend releases protection before
+requesting suspend and restores it after resume when the guarded conditions
+still apply. See [Sleep Protection](sleep-protection.md) for the full lifecycle.
 
 ## Security object
 
 `lockOnClosedUndock` locks through `org.freedesktop.ScreenSaver` when an active
 dock is removed while the lid is closed. `suspendOnClosedUndock` requests
-logind suspend after the lock. In the current state machine, suspend is nested
-under the lock condition; enabling suspend while disabling lock does not
-suspend. Both settings default to `false`. Once a closed-lid undock triggers
-the action, Dockstar will not trigger it again until the lid has been opened;
-this prevents a flapping dock connection from creating a lock/suspend loop.
+logind suspend 500 milliseconds after the lock. Suspend requires both settings,
+which default to `false`. A confirmed re-dock or open lid rearms the closed-undock
+transition. Re-dock, lid-open, config/policy changes, manual suspend, sleep/resume,
+and daemon exit cancel a pending automatic request. The callback rechecks
+connectivity and lid state after compositor discovery; unknown state cancels it.
+Lock/suspend decisions do not depend on successful layout application.
 
 ## Wake object
 
@@ -194,6 +202,10 @@ Dockstar determines identity in this order:
 EDID identity survives connector changes and is preferred for allowlisting.
 The connector fallback is stable only while the display uses the same logical
 connector name.
+An explicitly allowed `kde:` or `connector:` identity can authorize an EDID-less
+session display only when its connected DRM connector matches unambiguously.
+Current rules are rechecked when cached session metadata is used. These fallback
+identities cannot be enrolled in the root-owned pre-login allowlist.
 
 ## Revision rules
 
