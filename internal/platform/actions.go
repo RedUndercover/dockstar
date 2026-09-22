@@ -201,7 +201,7 @@ func connectWired(ctx context.Context, run commandFunc, pending string) (string,
 		_, err := run(ctx, "/usr/bin/nmcli", "device", "connect", device)
 		return device, true, err
 	}
-	return device, false, fmt.Errorf("Ethernet device %q is %s", device, state)
+	return device, false, fmt.Errorf("cannot connect Ethernet device %q while it is %s", device, state)
 }
 
 func ethernetState(ctx context.Context, run commandFunc, pending string) (string, string, error) {

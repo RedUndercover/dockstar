@@ -222,7 +222,7 @@ func (a *App) SuspendNow() (bool, error) {
 	ctx := a.ctx
 	a.mu.RUnlock()
 	if ctx == nil {
-		return false, errors.New("Dockstar window is not ready")
+		return false, errors.New("settings window is not ready")
 	}
 	choice, err := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
 		Type:          wailsruntime.QuestionDialog,
