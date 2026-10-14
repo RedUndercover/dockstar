@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	fyne.io/systray v1.12.2
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.3
 	github.com/wailsapp/wails/v2 v2.13.0
 	hazelnut.eclair.cafe/wlcl v1.1.2
 )
